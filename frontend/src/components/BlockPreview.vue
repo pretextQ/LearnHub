@@ -28,6 +28,7 @@ import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
 import mdAnchor from '../utils/mdAnchor'
 import mdMath, { renderMathInHtml } from '../utils/mdMath'
+import { sanitizeMarkdownHtml } from '../utils/markdownSanitize.js'
 import { MathInline, MathBlock } from '../utils/mathNodes'
 import { previewHtmlToMd } from '../utils/htmlToMd'
 import { BlockMeta, isBlockId } from '../utils/blockMeta'
@@ -288,7 +289,7 @@ function resumeComposition() { externalSync.resume(); contentSync.resume() }
 
 /** Convert saved Markdown tasks back into editable checkbox nodes. */
 function renderContent(markdown) {
-  const html = md.render(markdown || '')
+  const html = sanitizeMarkdownHtml(md.render(markdown || ''))
   if (!/\[[ xX]\]/.test(markdown || '')) return html
   const box = document.createElement('div')
   box.innerHTML = html
@@ -690,7 +691,7 @@ const BlockPaste = Extension.create({
         if (droppedImages) {
           ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
         }
-        return renderMathInHtml(cleaned, { renderKatex: false })
+        return sanitizeMarkdownHtml(renderMathInHtml(cleaned, { renderKatex: false }))
       },
     } })]
   },

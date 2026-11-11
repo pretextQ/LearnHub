@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import * as vue from 'vue'
+import * as markdownSanitize from './markdownSanitize.js'
 import * as profileView from './modelProfileView.js'
 import * as noteMerge from './agentNoteMerge.js'
 import * as noteEdit from './agentNoteEdit.js'
@@ -30,7 +31,7 @@ test('restored sessions retain their chat profile when model profiles arrive bef
   const sessions = deferred(), profiles = deferred(), events = []
   window.addEventListener('lh-agent-current', event => events.push(event.detail))
   const modules = {
-    vue, 'vue-router': { useRouter: () => ({}) },
+    vue, '../utils/markdownSanitize.js': markdownSanitize, 'vue-router': { useRouter: () => ({}) },
     'element-plus': { ElMessage: {}, ElMessageBox: {} },
     '../api': { aiApi: { async status() { return { configured: true } }, async session() { return { messages: [] } } },
       modelApi: { sessions: () => sessions.promise, profiles: () => profiles.promise }, settingsApi: { async get() { return {} } }, categoryApi: {}, noteApi: {} },

@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import * as vue from 'vue'
-import domino from '@mixmark-io/domino'
+import { JSDOM } from 'jsdom'
 import { getSchema } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import { DOMParser, DOMSerializer } from '@tiptap/pm/model'
@@ -37,7 +37,8 @@ const factory = new Function('modules', compiled
 function harness(options = {}) {
   const previousDocument = globalThis.document
   const previousWindow = globalThis.window
-  globalThis.window = domino.createWindow()
+  const dom = new JSDOM()
+  globalThis.window = dom.window
   globalThis.document = window.document
   const elementProto = Object.getPrototypeOf(document.createElement('div').children)
   if (!elementProto[Symbol.iterator]) Object.defineProperty(elementProto, Symbol.iterator, { value: Array.prototype[Symbol.iterator] })
@@ -62,7 +63,7 @@ function harness(options = {}) {
   const setup = scope.run(() => component.setup(props, { expose: value => { exposed = value }, emit: (...args) => events.push(args) }))
   setup.editor.value = editor
   return { props, editor, setup, exposed, events, transactions,
-    cleanup() { setup.editor.value = null; unmounts.forEach(callback => callback()); scope.stop(); globalThis.document = previousDocument; globalThis.window = previousWindow },
+    cleanup() { setup.editor.value = null; unmounts.forEach(callback => callback()); scope.stop(); dom.window.close(); globalThis.document = previousDocument; globalThis.window = previousWindow },
   }
 }
 

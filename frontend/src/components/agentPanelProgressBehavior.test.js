@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import * as vue from 'vue'
+import * as markdownSanitize from '../utils/markdownSanitize.js'
 import * as profileView from '../utils/modelProfileView.js'
 import * as noteMerge from '../utils/agentNoteMerge.js'
 import * as noteEdit from '../utils/agentNoteEdit.js'
@@ -34,7 +35,7 @@ function harness(options = {}) {
   const reads = []
   window.addEventListener(noteEdit.AGENT_NOTE_UPDATED_EVENT, event => updates.push(event.detail))
   const component = factory({
-    vue, 'vue-router': { useRouter: () => ({ push() {} }) },
+    vue, '../utils/markdownSanitize.js': markdownSanitize, 'vue-router': { useRouter: () => ({ push() {} }) },
     'element-plus': { ElMessage: {
       success: text => notices.push({ type: 'success', text }),
       info: text => notices.push({ type: 'info', text }),

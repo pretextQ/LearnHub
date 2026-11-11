@@ -1,4 +1,5 @@
 <script setup>
+import { sanitizeMarkdownHtml } from '../utils/markdownSanitize.js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -1572,7 +1573,7 @@ onBeforeUnmount(() => {
             </details>
             <p v-if="wikiPage.contentMd" class="wiki-guide-note">模型生成的知识导览，关键结论请点击来源核对原文。</p>
             <div v-if="wikiPage.contentMd" ref="wikiBody" class="wiki-body md-doc" @click="onWikiClick">
-              <MdPreview :modelValue="wikiMd" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" :mdHeadingId="wikiHeadingId" @onHtmlChanged="locateWikiSection" />
+              <MdPreview :sanitize="sanitizeMarkdownHtml" :modelValue="wikiMd" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" :mdHeadingId="wikiHeadingId" @onHtmlChanged="locateWikiSection" />
             </div>
             <div v-else class="wiki-empty">
               <p>这个主题还没有 wiki 页。</p>

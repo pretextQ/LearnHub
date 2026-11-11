@@ -173,8 +173,10 @@ export function renderMathInHtml(html, { renderKatex = true } = {}) {
     && !new RegExp(`</${root}\\s*>`, 'i').test(source)) return source
   if (/^\s*<\//.test(source) || (/^\s*<(?:tr|td|th|thead|tbody|tfoot|colgroup)\b/i.test(source))) return source
   if (htmlTableDepth(source) > 0) return source
-  const box = document.createElement('div')
-  box.innerHTML = source
+  // Raw Markdown HTML is inspected before the output sanitizer. A template keeps it inert.
+  const template = document.createElement('template')
+  template.innerHTML = source
+  const box = template.content
   let changed = false
 
   function shell(tex, display) {
@@ -237,7 +239,7 @@ export function renderMathInHtml(html, { renderKatex = true } = {}) {
     }
     for (const child of Array.from(node.childNodes)) visit(child)
   }
-  visit(box)
+  for (const child of Array.from(box.childNodes)) visit(child)
   // A display formula cannot be serialized as a div inside a paragraph: HTML
   // reparsing would insert empty paragraphs and move the remaining text. Split
   // its textblock explicitly, retaining inline formatting on either side.
@@ -263,7 +265,7 @@ export function renderMathInHtml(html, { renderKatex = true } = {}) {
     paragraph.replaceWith(...[before, block, after].filter(node => node === block || hasContent(node)))
     changed = true
   }
-  return changed ? box.innerHTML : source
+  return changed ? template.innerHTML : source
 }
 
 /**

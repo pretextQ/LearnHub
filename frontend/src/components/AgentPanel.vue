@@ -1,4 +1,5 @@
 <script setup>
+import { sanitizeMarkdownHtml } from '../utils/markdownSanitize.js'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -1163,7 +1164,7 @@ function askFromEvent(e) {
                     </component>
                     <span v-if="group.key === 'guide'" class="ref-guide-note">请结合原文核对</span>
                   </div>
-                  <div v-if="m.content" class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content)" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" /></div>
+                  <div v-if="m.content" class="md-body"><MdPreview :sanitize="sanitizeMarkdownHtml" :modelValue="fixHtmlQuotes(m.content)" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" /></div>
                   <div v-if="m.groundingStatus" class="grounding-line" :class="m.groundingStatus.status">
                     <details v-if="m.groundingStatus.note || m.groundingStatus.unsupported.length">
                       <summary>{{ m.groundingStatus.label }}</summary>
@@ -1214,10 +1215,10 @@ function askFromEvent(e) {
                   <div v-for="(c, index) in a.preview.changes" :key="index" class="edit-preview-change">
                     <div class="edit-preview-label">{{ index + 1 }}. {{ c.label }} · {{ c.count }} 处</div>
                     <div class="edit-preview-caption">修改前</div>
-                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-before-${a.id}-${index}`" :model-value="c.before || '（空）'" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" preview-theme="github" class="edit-preview-rendered edit-preview-before" />
+                    <MdPreview :sanitize="sanitizeMarkdownHtml" v-if="c.action === 'format'" :editor-id="`edit-before-${a.id}-${index}`" :model-value="c.before || '（空）'" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" preview-theme="github" class="edit-preview-rendered edit-preview-before" />
                     <pre v-else class="edit-preview-before">{{ c.before || '（空）' }}</pre>
                     <div class="edit-preview-caption">修改后</div>
-                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-after-${a.id}-${index}`" :model-value="c.after || '（空）'" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" preview-theme="github" class="edit-preview-rendered edit-preview-after" />
+                    <MdPreview :sanitize="sanitizeMarkdownHtml" v-if="c.action === 'format'" :editor-id="`edit-after-${a.id}-${index}`" :model-value="c.after || '（空）'" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" preview-theme="github" class="edit-preview-rendered edit-preview-after" />
                     <pre v-else class="edit-preview-after">{{ c.after || '（空）' }}</pre>
                   </div>
                 </div>
@@ -1287,7 +1288,7 @@ function askFromEvent(e) {
           <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
         </el-select>
         <div class="save-preview">
-          <MdPreview :modelValue="fixHtmlQuotes(saveForm.content || '*内容为空*')" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" />
+          <MdPreview :sanitize="sanitizeMarkdownHtml" :modelValue="fixHtmlQuotes(saveForm.content || '*内容为空*')" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" />
         </div>
       </div>
       <template #footer>

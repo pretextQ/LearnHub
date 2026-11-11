@@ -16,6 +16,7 @@ import { fixHtmlQuotes } from './htmlQuotes'
 import mdCallout from './mdCallout'
 import mdAnchor from './mdAnchor'
 import mdMath from './mdMath'
+import { sanitizeMarkdownHtml } from './markdownSanitize.js'
 import { renderMermaid, mermaidFrameDocument, mermaidSvgSize } from './mermaidPreview'
 // 导出的 HTML 要能离线看公式，所以把 katex 的 CSS 也内联进去（与 hljs 的 CSS 同样处理）
 import katexCss from 'katex/dist/katex.min.css?raw'
@@ -57,7 +58,7 @@ md.renderer.rules.fence = function (tokens, index, options, env, renderer) {
   const fallback = renderFence(tokens, index, options, env, renderer)
   const token = tokens[index]
   if (!env.mermaidExports || token.info.trim().split(/\s+/)[0].toLowerCase() !== 'mermaid') return fallback
-  const marker = `<!--${env.mermaidPrefix}${env.mermaidExports.length}-->`
+  const marker = env.mermaidPrefix + env.mermaidExports.length + 'END'
   env.mermaidExports.push({ marker, source: token.content, fallback })
   return marker
 }
@@ -74,10 +75,10 @@ function diagramFrame(svg, variant) {
 }
 
 async function renderExportBody(content, renderDiagram) {
-  let prefix = 'LEARNHUBMERMAIDEXPORT'
-  while (content.includes(prefix)) prefix += 'X'
+  const prefix = 'LEARNHUBMERMAID' + globalThis.crypto.getRandomValues(new Uint32Array(4)).join('_') + '_'
   const env = { mermaidPrefix: prefix, mermaidExports: [] }
-  let body = md.render(content, env)
+  // Untrusted HTML is sanitized before inserting our sandboxed Mermaid frames.
+  let body = sanitizeMarkdownHtml(md.render(content, env))
   for (const diagram of env.mermaidExports) {
     let rendered = diagram.fallback
     try {
@@ -310,5 +311,5 @@ ${body}
  * 片段交给浏览器 DOMParser 解析，不经过那一步。
  */
 export function renderMarkdownFragment(markdown) {
-  return md.render(String(markdown == null ? '' : markdown))
+  return sanitizeMarkdownHtml(md.render(String(markdown ?? '')))
 }

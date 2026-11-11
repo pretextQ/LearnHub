@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import domino from '@mixmark-io/domino'
+import { JSDOM } from 'jsdom'
 import { documentHtmlToMd } from './htmlToMd.js'
 
 // Match the two Vite import conveniences used by this module without starting a
@@ -24,7 +25,10 @@ const hooks = registerHooks({
   },
 })
 const { renderNoteHtml, renderMarkdownFragment } = await import('./mdToHtml.js')
-test.after(() => hooks.deregister())
+const dom = new JSDOM()
+globalThis.window = dom.window
+globalThis.document = dom.window.document
+test.after(() => { hooks.deregister(); dom.window.close() })
 
 const flowchart = 'flowchart LR\n  A[合成输入] --> B[合成结果]\n'
 const fence = source => `\`\`\`mermaid\n${source}\`\`\``
@@ -163,7 +167,21 @@ test('concurrent exports and synchronous clipboard rendering keep their own diag
 
 test('user text resembling an export placeholder remains literal', async () => {
   const literal = '<!--LEARNHUBMERMAIDEXPORT0-->'
-  const html = await renderNoteHtml({ title: '合成占位符', content: `${literal}\n\n${fence(flowchart)}` }, { renderDiagram })
-  assert.ok(html.includes(literal))
+  const html = await renderNoteHtml({ title: '合成占位符', content: '\x60' + literal + '\x60\n\n' + fence(flowchart) }, { renderDiagram })
+  assert.equal(inspect(html).querySelector('p code').textContent, literal)
   assert.equal(inspect(html).querySelectorAll('.note-mermaid-export').length, 1)
+})
+
+test('export sanitizes untrusted markup while preserving theme styles, anchors and math', async () => {
+  const content = '## Sample\n\n' +
+    '<table style="width: 360px"><tbody><tr><td>cell</td></tr></tbody></table>\n\n' +
+    '<span style="color: var(--brand); position: fixed" onfocus="">text</span>\n\n' +
+    '<iframe title="untrusted sample"></iframe>\n\n$x^2$'
+  const document = inspect(await renderNoteHtml({ title: 'Synthetic', content }))
+  assert.equal(document.querySelector('table').getAttribute('style'), 'width: 360px')
+  assert.equal(document.querySelector('span[style]').getAttribute('style'), 'color: var(--brand)')
+  assert.ok(document.querySelector('h2[id]'))
+  assert.ok(document.querySelector('.katex math'))
+  assert.ok(!document.querySelector('iframe, [onfocus]'))
+  assert.match(document.querySelector('style').textContent, /prefers-color-scheme/)
 })

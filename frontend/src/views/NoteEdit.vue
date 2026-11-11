@@ -1,4 +1,5 @@
 <script setup>
+import { sanitizeMarkdownHtml } from '../utils/markdownSanitize.js'
 import { computed, h, nextTick, render, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -1379,18 +1380,19 @@ const outline = ref([])
 function refreshOutline() {
   const items = []
   const tokens = outlineMarkdown.parse(form.value.content || '', {})
-  const container = document.createElement('div')
+  const template = document.createElement('template')
+  const container = template.content
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]
     if (token.type === 'heading_open' && /^h[1-3]$/.test(token.tag)) {
       const inline = tokens[i + 1]
-      container.innerHTML = inline?.type === 'inline'
+      template.innerHTML = inline?.type === 'inline'
         ? outlineMarkdown.renderer.renderInline(inline.children || [], outlineMarkdown.options, {})
         : ''
       items.push({ level: Number(token.tag[1]), text: container.textContent.trim() })
     } else if (token.type === 'html_block') {
       // Linked or indented headings are saved as HTML to retain their metadata.
-      container.innerHTML = token.content
+      template.innerHTML = token.content
       for (const heading of container.querySelectorAll('h1, h2, h3')) {
         items.push({ level: Number(heading.tagName[1]), text: heading.textContent.trim() })
       }
@@ -4209,6 +4211,7 @@ onBeforeUnmount(() => {
         @keydown.capture="onScrollIntent('editor')"
       >
         <MdEditor
+          :sanitize="sanitizeMarkdownHtml"
           v-if="sourceEditorMounted"
           ref="editorRef"
           v-model="form.content"
@@ -4273,6 +4276,7 @@ onBeforeUnmount(() => {
               @layout="onPreviewLayoutChange"
             />
             <MdPreview
+              :sanitize="sanitizeMarkdownHtml"
               v-else
               :modelValue="form.content"
               :sanitize-mermaid="mermaidFrameHtml"
@@ -4437,6 +4441,7 @@ onBeforeUnmount(() => {
           <pre>{{ mergePatch.before }}</pre>
         </details>
         <MdPreview
+          :sanitize="sanitizeMarkdownHtml"
           :modelValue="fixHtmlQuotes(mergePatch ? mergePatch.after : aiResult) || '*空内容*'"
           :sanitize-mermaid="mermaidFrameHtml"
           :theme="isDark ? 'dark' : 'light'"

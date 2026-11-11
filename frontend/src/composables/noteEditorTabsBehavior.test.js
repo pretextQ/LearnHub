@@ -31,7 +31,11 @@ function installBrowserMocks() {
   const windowMock = Object.assign(new EventTarget(), { innerWidth: 1400, getSelection: () => null, location: { origin: 'http://localhost' } })
   const documentMock = Object.assign(new EventTarget(), {
     activeElement: null, querySelector: () => null,
-    createElement: () => ({ innerHTML: '', textContent: '', querySelectorAll: () => [], classList: { add() {}, remove() {} } }),
+    createElement: tag => {
+      const element = { innerHTML: '', textContent: '', querySelectorAll: () => [], classList: { add() {}, remove() {} } }
+      if (tag === 'template') element.content = element
+      return element
+    },
     body: { classList: { add() {}, remove() {} } },
   })
   let frame = 0
