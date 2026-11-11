@@ -286,4 +286,4 @@ tools/         开发与维护工具
 
 使用 [PolyForm Noncommercial 1.0.0](LICENSE) 许可证。非商业使用与分发应遵守许可证条款；商业使用需另行获得授权。
 
-© 2026 dyh
+© 2026 QiuLf
