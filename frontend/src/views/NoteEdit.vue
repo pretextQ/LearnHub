@@ -75,6 +75,7 @@ const tags = ref([])
 const folders = ref([])
 const folderOptions = computed(() => flattenFolderOptions(folders.value))
 const savedFolderId = ref(0)
+const savedRevision = ref(null)
 const form = ref({ title: '', content: '', categoryId: undefined, folderId: 0, tagIds: [] })
 const titleInputRef = ref(null)
 // Tool popovers can take focus; retain the editor that last held the caret.
@@ -96,7 +97,7 @@ function formFingerprint(f = form.value) {
 const savedSnapshot = ref('')
 // Decode the saved snapshot once; typing must not stringify the whole note.
 const savedForm = computed(() => savedSnapshot.value ? JSON.parse(savedSnapshot.value) : null)
-const agentEditConflict = ref(false)
+const noteVersionConflict = ref(false)
 /**
  * 「有未保存改动」= 表单与上次保存的指纹不同，**或者**预览里还有没反推回源码的改动。
  * 后半句是单栏阅读模式（默认模式）的安全网：那一栏里敲的字先落在 DOM 上、失焦才反推回 Markdown，
@@ -687,7 +688,7 @@ async function prepareCurrentAgentNote(request = {}) {
     flushBlockContent()
     if (editorRef.value?.getEditorView?.()?.composing) throw new Error('请结束当前输入法输入后重试；草稿已保留')
     if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) throw new Error('预览草稿无法同步，请先处理编辑器中的提示')
-    if (agentEditConflict.value) throw new Error('笔记存在版本冲突，请先加载最新正文；本地草稿已保留')
+    if (noteVersionConflict.value) throw new Error('笔记存在版本冲突，请先加载最新笔记；本地草稿已保留')
     if (saving.value || dirty.value || isNew.value) {
       const saved = await save({ silent: true })
       if (!saved) throw new Error(saveError.value || '笔记自动保存失败，草稿已保留，未执行本次修改')
@@ -750,34 +751,39 @@ async function onAgentNoteUpdated(e) {
   const noteId = e?.detail?.noteId
   if (!matchesOpenNote(id.value, noteId)) return
   if (dirty.value) {
-    agentEditConflict.value = true
+    noteVersionConflict.value = true
     if (props.active) ElMessage.warning('智能体已更新库中正文，本地草稿已保留，请加载最新正文后再编辑')
     return
   }
+  const revisionAtRead = savedRevision.value
   try {
     const latest = await noteApi.detail(noteId)
-    if (!matchesOpenNote(id.value, noteId)) return
-    // 请求期间敲了字也保留草稿，不让网络响应覆盖本地编辑。
-    if (dirty.value) {
-      agentEditConflict.value = true
+    if (!matchesOpenNote(id.value, noteId) || savedRevision.value !== revisionAtRead) return
+    // 自动同步只更新正文；其他字段有变化时必须重新加载完整的笔记，
+    // 否则使用新版本保存仍会把库中其他字段覆盖成旧值。
+    if (dirty.value || latest.title !== form.value.title
+        || (latest.categoryId ?? null) !== (form.value.categoryId ?? null)
+        || JSON.stringify((latest.tags || []).map(tag => tag.id).sort()) !== JSON.stringify([...form.value.tagIds].sort())) {
+      noteVersionConflict.value = true
       return
     }
     applyAgentContent(latest.content || '')
+    savedRevision.value = latest.revision ?? null
     flushBlockContent()
     if (!blockPreviewRef.value?.hasPendingContent?.()) previewUnsynced.value = false
     savedSnapshot.value = formFingerprint()
     lastSavedAt.value = new Date()
     publishAgentNote()
   } catch {
-    if (matchesOpenNote(id.value, noteId)) agentEditConflict.value = true
+    if (matchesOpenNote(id.value, noteId)) noteVersionConflict.value = true
   }
 }
 
-async function reloadAfterAgentEdit() {
+async function reloadLatestNote() {
   const expectedId = id.value
   if (dirty.value) {
     try {
-      await ElMessageBox.confirm('加载会替换当前未保存的正文，请先复制需要保留的草稿。', '加载最新笔记', {
+      await ElMessageBox.confirm('加载会替换当前未保存的内容，请先复制需要保留的草稿。', '加载最新笔记', {
         confirmButtonText: '加载最新', cancelButtonText: '保留草稿', type: 'warning',
       })
     } catch { return }
@@ -1009,7 +1015,9 @@ let loadSeq = 0
 async function loadNote() {
   loadError.value = ''
   noteReady.value = false
-  agentEditConflict.value = false
+  noteVersionConflict.value = false
+  savedRevision.value = null
+  saveError.value = ''
   // 每次点进一篇笔记都从「单栏阅读」开始（用户要求）：源码对照需要显式进
   readingMode.value = true
   if (isNew.value) {
@@ -1044,6 +1052,7 @@ async function loadNote() {
       tagIds: (n.tags || []).map((t) => t.id),
     }
     savedFolderId.value = form.value.folderId
+    savedRevision.value = n.revision ?? null
   } catch (error) {
     if (seq === loadSeq) loadError.value = error?.message || '笔记加载失败，请重试'
     return
@@ -1122,8 +1131,8 @@ function save(options = {}) {
 
 async function persistNote({ silent = false } = {}) {
   if (saving.value || loading.value || loadError.value || !noteReady.value) return false
-  if (agentEditConflict.value) {
-    ElMessage.warning('库中正文已更新，请先点击「加载最新正文」，避免旧草稿覆盖智能体的改动')
+  if (noteVersionConflict.value) {
+    ElMessage.warning('库中的笔记已更新，请先点击「加载最新笔记」')
     return false
   }
   if (!form.value.title.trim()) {
@@ -1160,6 +1169,7 @@ async function persistNote({ silent = false } = {}) {
       }
       justCreatedId = String(created.id)
       lastPersistedNoteId = created.id
+      savedRevision.value = created.revision ?? null
       savedFolderId.value = folderAtSave
       lastSavedAt.value = new Date()
       if (!silent) ElMessage.success('笔记已创建')
@@ -1174,7 +1184,9 @@ async function persistNote({ silent = false } = {}) {
       // 保存**前**先记指纹：保存期间用户若继续打字，指纹会变，那时状态必须仍然是「未保存」。
       // 原来在 await 之后才取指纹，会把"保存期间新打的字"误标成已保存（服务端并没有这些内容）。
       const fingerprintAtSave = formFingerprint()
-      await noteApi.update(id.value, payload)
+      if (savedRevision.value != null) payload.expectedRevision = savedRevision.value
+      const saved = await noteApi.update(id.value, payload)
+      savedRevision.value = saved?.revision ?? savedRevision.value
       lastPersistedNoteId = id.value
       savedFolderId.value = folderAtSave
       savedSnapshot.value = fingerprintAtSave
@@ -1195,6 +1207,7 @@ async function persistNote({ silent = false } = {}) {
   } catch (e) {
     // 保存失败：内容还在编辑器里、dirty 仍为真，但必须让失败看得见并可重试，
     // 否则「未保存」和「保存失败」在界面上长得一样。
+    if (e?.response?.status === 409) noteVersionConflict.value = true
     saveError.value = e?.message || '保存失败'
     return false
   } finally {
@@ -4005,8 +4018,8 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <el-alert v-if="agentEditConflict" type="warning" :closable="false" show-icon>
-      <template #title>库中正文已更新，当前草稿已保留。<el-button link type="primary" @click="reloadAfterAgentEdit">加载最新正文</el-button></template>
+    <el-alert v-if="noteVersionConflict" type="warning" :closable="false" show-icon>
+      <template #title>库中的笔记已更新，当前草稿已保留。<el-button link type="primary" @click="reloadLatestNote">加载最新笔记</el-button></template>
     </el-alert>
 
     <!-- ======== 顶部第二行：语雀式工具条（单栏阅读模式也保留，作用于那一栏正文；源码对照下作用于当前有焦点的编辑区） ======== -->

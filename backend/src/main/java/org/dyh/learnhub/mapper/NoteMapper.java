@@ -39,6 +39,6 @@ public interface NoteMapper extends BaseMapper<Note> {
     List<Long> selectNoteIdsByTag(Long tagId);
 
     /** 解除某分类下所有笔记的分类归属（删除分类前调用），返回受影响笔记数 */
-    @Update("UPDATE note SET category_id = NULL WHERE category_id = #{categoryId}")
+    @Update("UPDATE note SET category_id = NULL, revision = revision + 1 WHERE category_id = #{categoryId}")
     int unbindNotesByCategory(Long categoryId);
 }

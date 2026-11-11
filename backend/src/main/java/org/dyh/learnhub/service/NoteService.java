@@ -10,6 +10,7 @@ import org.commonmark.parser.IncludeSourceSpans;
 import org.commonmark.parser.Parser;
 import org.dyh.learnhub.common.KnowledgeChangedEvent;
 import org.dyh.learnhub.common.PageResult;
+import org.dyh.learnhub.common.NoteVersionConflictException;
 import org.dyh.learnhub.dto.NoteDTO;
 import org.dyh.learnhub.dto.NoteEditRequest;
 import org.dyh.learnhub.dto.NoteTagRow;
@@ -67,7 +68,8 @@ public class NoteService {
             noteMapper.update(null, Wrappers.<Note>lambdaUpdate().eq(Note::getId, id)
                     .set(Note::getContent, edit.content())
                     .set(Note::getSummary, plainSummary(edit.content()))
-                    .set(Note::getUpdatedAt, java.time.LocalDateTime.now()));
+                    .set(Note::getUpdatedAt, java.time.LocalDateTime.now())
+                    .setSql("revision = revision + 1"));
             learningActivity.record("note", id);
             publishChanged(note.getCategoryId());
         }
@@ -220,11 +222,15 @@ public class NoteService {
                 .set(Note::getTitle, dto.getTitle().trim())
                 .set(Note::getContent, content)
                 .set(Note::getSummary, plainSummary(content))
-                .set(Note::getCategoryId, dto.getCategoryId());
+                .eq(dto.getExpectedRevision() != null, Note::getRevision, dto.getExpectedRevision())
+                .set(Note::getCategoryId, dto.getCategoryId())
+                .setSql("revision = revision + 1");
         if (dto.isFolderIdProvided()) {
             update.set(Note::getFolderId, folderService.requireTarget("note", dto.getFolderId()));
         }
-        noteMapper.update(null, update);
+        if (noteMapper.update(null, update) != 1) {
+            throw new NoteVersionConflictException();
+        }
         if (dto.getTagIds() != null) {
             noteMapper.deleteNoteTags(id);
             saveTags(id, dto.getTagIds());
@@ -366,6 +372,7 @@ public class NoteService {
         vo.setId(note.getId());
         vo.setTitle(note.getTitle());
         vo.setContent(withContent ? note.getContent() : null);
+        vo.setRevision(withContent ? note.getRevision() : null);
         vo.setSummary(resolveSummary(note));
         vo.setCategoryId(note.getCategoryId());
         vo.setFolderId(note.getFolderId());

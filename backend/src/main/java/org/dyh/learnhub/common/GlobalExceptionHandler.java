@@ -19,6 +19,12 @@ public class GlobalExceptionHandler {
         return Result.error(400, e.getMessage());
     }
 
+    @ExceptionHandler(NoteVersionConflictException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public Result<Void> handleNoteVersionConflict(NoteVersionConflictException e) {
+        return Result.error(409, e.getMessage());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public Result<Void> handleValidation(MethodArgumentNotValidException e) {
         String msg = e.getBindingResult().getFieldErrors().stream()

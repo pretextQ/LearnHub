@@ -939,3 +939,37 @@ test('a narrow source outline jump displays and flushes the latest preview befor
     assert.equal(a.state.dirty, true)
   } finally { await h.cleanup() }
 })
+
+test('a version conflict retains the draft and each successful save advances the precondition', async () => {
+  let revision = 3
+  const h = await harness({
+    detail: id => ({ id, title: '合成笔记', content: '原始正文', revision, tags: [] }),
+    update: (_id, payload) => {
+      if (payload.expectedRevision !== revision) {
+        throw Object.assign(new Error('版本冲突'), { response: { status: 409 } })
+      }
+      return { revision: ++revision }
+    },
+  })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    a.state.form.content = '第一次保存'
+    assert.equal(await a.state.save(), true)
+    assert.equal(h.writes[0].payload.expectedRevision, 3)
+    a.state.form.content = '第二次保存'
+    assert.equal(await a.state.save(), true)
+    assert.equal(h.writes[1].payload.expectedRevision, 4)
+    revision++
+    a.state.form.content = '另一页更新后的本地草稿'
+    assert.equal(await a.state.save(), false)
+    assert.equal(a.state.form.content, '另一页更新后的本地草稿')
+    assert.equal(a.state.dirty, true)
+    assert.equal(a.state.noteVersionConflict, true)
+    assert.equal(await a.state.save(), false)
+    assert.equal(h.writes.length, 3)
+    h.setAllowClose(false)
+    await a.state.reloadLatestNote()
+    assert.equal(a.state.form.content, '另一页更新后的本地草稿')
+    assert.equal(a.state.noteVersionConflict, true)
+  } finally { await h.cleanup() }
+})

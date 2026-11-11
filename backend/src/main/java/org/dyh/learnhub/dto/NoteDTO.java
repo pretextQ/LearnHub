@@ -13,6 +13,10 @@ public class NoteDTO {
 
     private String content;
 
+    /** 客户端最后读到的笔记版本；旧客户端可省略。 */
+    @jakarta.validation.constraints.PositiveOrZero
+    private Long expectedRevision;
+
     private Long categoryId;
 
     private Long folderId;

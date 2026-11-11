@@ -7,10 +7,18 @@ import com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration;
 import org.mybatis.spring.annotation.MapperScan;
 import org.dyh.learnhub.dto.FolderMoveRequest;
 import org.dyh.learnhub.dto.FolderRequest;
+import org.dyh.learnhub.dto.NoteDTO;
+import org.dyh.learnhub.common.NoteVersionConflictException;
 import org.dyh.learnhub.mapper.ContentFolderMapper;
+import org.dyh.learnhub.mapper.CategoryMapper;
+import org.dyh.learnhub.mapper.TagMapper;
 import org.dyh.learnhub.mapper.FileInfoMapper;
 import org.dyh.learnhub.mapper.NoteMapper;
 import org.dyh.learnhub.service.FolderService;
+import org.dyh.learnhub.service.NoteService;
+import org.dyh.learnhub.service.NoteContentEditor;
+import org.dyh.learnhub.service.LearningActivityService;
+import org.springframework.context.ApplicationEventPublisher;
 import org.dyh.learnhub.service.EntityLinker;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -427,6 +435,11 @@ class DatabaseMigrationTest {
         @Bean FolderService folderService(ContentFolderMapper folders, NoteMapper notes, FileInfoMapper files) {
             return new FolderService(folders, notes, files);
         }
+        @Bean NoteService noteService(NoteMapper notes, CategoryMapper categories, TagMapper tags,
+                                      ApplicationEventPublisher events, FolderService folders) {
+            return new NoteService(notes, categories, tags,
+                    org.mockito.Mockito.mock(LearningActivityService.class), events, new NoteContentEditor(), folders);
+        }
     }
 
     private static ApplicationContextRunner folderApplication(String url) {
@@ -497,6 +510,46 @@ class DatabaseMigrationTest {
         });
     }
 
+    @Test
+    void twoWritersUsingTheSameNoteRevisionCannotBothCommit() {
+        String url = emptyDatabase();
+        folderApplication(url).run(context -> {
+            assertThat(context).hasNotFailed();
+            var service = context.getBean(NoteService.class);
+            var note = service.save(noteInput("原始正文", null));
+            assertThat(note.getRevision()).isEqualTo(0L);
+            var gate = new CountDownLatch(1);
+            try (var pool = Executors.newFixedThreadPool(2)) {
+                var a = pool.submit(() -> attemptNoteSave(service, note.getId(), noteInput("草稿 A", note.getRevision()), gate));
+                var b = pool.submit(() -> attemptNoteSave(service, note.getId(), noteInput("草稿 B", note.getRevision()), gate));
+                gate.countDown();
+                assertThat(List.of(a.get(15, TimeUnit.SECONDS), b.get(15, TimeUnit.SECONDS)))
+                        .containsExactlyInAnyOrder(true, false);
+            }
+            assertThat(service.detail(note.getId()).getRevision()).isEqualTo(1L);
+            assertThat(service.detail(note.getId()).getContent()).isIn("草稿 A", "草稿 B");
+            assertThat(service.update(note.getId(), noteInput("旧客户端保存", null)).getRevision()).isEqualTo(2L);
+        });
+    }
+
+    private static NoteDTO noteInput(String content, Long expectedRevision) {
+        var dto = new NoteDTO();
+        dto.setTitle("合成笔记");
+        dto.setContent(content);
+        dto.setExpectedRevision(expectedRevision);
+        return dto;
+    }
+
+    private static boolean attemptNoteSave(NoteService service, Long id, NoteDTO dto, CountDownLatch gate) throws Exception {
+        if (!gate.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("concurrent save did not start");
+        try {
+            service.update(id, dto);
+            return true;
+        } catch (NoteVersionConflictException stale) {
+            return false;
+        }
+    }
+
     private static boolean attemptMove(FolderService service, Long self, Long parent, CountDownLatch gate) throws Exception {
         gate.await(10, TimeUnit.SECONDS);
         try {
@@ -550,7 +603,7 @@ class DatabaseMigrationTest {
         jdbc(url).update("""
                 INSERT INTO flyway_schema_history
                 (installed_rank, version, description, type, script, checksum, installed_by, execution_time, success)
-                VALUES (8, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
+                VALUES (999, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
                 """);
         application(url).run(context -> assertThat(context).hasFailed());
     }
@@ -560,7 +613,7 @@ class DatabaseMigrationTest {
         String url = emptyDatabase();
         application(url, "spring.flyway.locations=classpath:db/migration,classpath:db/intentional-failure")
                 .run(context -> assertThat(context).hasFailed());
-        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '8'", Boolean.class))
+        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '9999'", Boolean.class))
                 .isFalse();
     }
 }

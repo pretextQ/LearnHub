@@ -35,6 +35,7 @@ class NoteFolderBindingTest {
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), "note-folder-test"), Note.class);
         var note = new Note(); note.setId(1L); note.setTitle("笔记"); note.setContent("正文"); note.setFolderId(5L);
         when(notes.selectById(1L)).thenReturn(note);
+        when(notes.update(isNull(), any())).thenReturn(1);
         when(tags.selectByNoteId(1L)).thenReturn(List.of());
     }
 
@@ -62,6 +63,22 @@ class NoteFolderBindingTest {
         assertThatThrownBy(() -> service.update(1L, dto)).isInstanceOf(IllegalArgumentException.class);
         verify(notes, never()).update(isNull(), any());
         verify(notes, never()).deleteNoteTags(anyLong());
+    }
+
+    @Test void staleVersionDoesNotTouchTagsOrReportSuccess() {
+        var dto = new NoteDTO();
+        dto.setTitle("合成笔记");
+        dto.setExpectedRevision(0L);
+        dto.setTagIds(List.of(5L));
+        when(notes.update(isNull(), any())).thenReturn(0);
+        assertThatThrownBy(() -> service.update(1L, dto))
+                .isInstanceOf(org.dyh.learnhub.common.NoteVersionConflictException.class);
+        var statement = update();
+        assertThat(statement.getSqlSegment()).contains("revision =");
+        assertThat(statement.getSqlSet()).contains("revision = revision + 1");
+        verify(notes, never()).deleteNoteTags(anyLong());
+        verify(notes, never()).insertNoteTags(anyLong(), anyList());
+        verifyNoInteractions(tags);
     }
 
     @Test void newNoteStoresValidatedFolder() {

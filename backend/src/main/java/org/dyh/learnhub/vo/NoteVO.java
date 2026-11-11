@@ -26,6 +26,10 @@ public class NoteVO {
         return content == null ? null : org.dyh.learnhub.service.NoteContentEditor.hash(content);
     }
 
+    /** 整篇笔记版本，供普通保存提交前置条件；列表不返回。 */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long revision;
+
     private Long categoryId;
     private Long folderId;
     private String categoryName;
