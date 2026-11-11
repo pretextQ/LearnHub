@@ -276,6 +276,7 @@ tools/         开发与维护工具
 - [网页获取与分页续读](docs/web-fetching.md)
 - [学习活动记录](docs/learning-activity.md)
 - [PDF 正文排版](docs/pdf-layout-design.md)
+- [代码审查报告（2026-11-11）](docs/code-review-2026-11-11.md)
 - [技能目录与提示词](skills/README.md)
 - [应用命令与内置智能体](cli/README.md#应用操作与内置智能体)
 - [MCP 接入](mcp/README.md)
