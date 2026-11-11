@@ -62,8 +62,8 @@ npx @luyiyanyumu/learnhub@latest update --to 0.2.0
 1. 选择含有 `backup.json` 且 `consistent=true` 的完整备份。先执行 `stop`，把当前实例的 `.env`、`installation.json`、`pending-update.json` 和 `config/` 另存到一个恢复前快照目录。保留原备份目录。读取备份的安装记录：
 
    ```powershell
-   $taskInstance = (Resolve-Path '<project-path>').Path
-   $taskBackup = (Resolve-Path '<project-path>').Path
+   $taskInstance = (Resolve-Path 'C:\Users\you\.learnhub').Path
+   $taskBackup = (Resolve-Path 'C:\Users\you\.learnhub\backups\完整备份目录').Path
    $taskBefore = Join-Path $taskInstance 'before-manual-restore'
    node cli/bin/learnhub.mjs stop --home $taskInstance
    New-Item -ItemType Directory -Path $taskBefore

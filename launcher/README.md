@@ -79,9 +79,9 @@ GitHub API 返回 403/429 时，会尝试通过官方 `/releases/latest` 重定�
 EXE 支持无窗口命令模式；成功退出码为 `0`，失败为非 `0`。使用绝对项目路径可以避免工作目录变化：
 
 ```powershell
-./LearnHub.exe --action diagnose --mode docker --project '<project-path>' --output 'C:\Temp\learnhub-status.json'
-./LearnHub.exe --action start-all --mode docker --project '<project-path>'
-./LearnHub.exe --action restart --service backend --mode local --project '<project-path>'
+./LearnHub.exe --action diagnose --mode docker --project 'C:\Projects\LearnHub' --output 'C:\Temp\learnhub-status.json'
+./LearnHub.exe --action start-all --mode docker --project 'C:\Projects\LearnHub'
+./LearnHub.exe --action restart --service backend --mode local --project 'C:\Projects\LearnHub'
 ```
 
 版本功能也提供原生命令行参数：`--check-updates` 手动联网检查稳定发布；`--update-source --version <版本> --commit <SHA>` 使用检查结果中的版本及提交更新源码。两者均可配合 `--project` 和 `--output`。源码更新沿用图形界面的工作区与快进检查，完成后仍需单独构建并应用服务。

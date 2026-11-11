@@ -51,7 +51,7 @@ cd LearnHub
 
 ```bash
 docker run -d --name learn-hub-mysql \
-  -e MYSQL_ROOT_PASSWORD=<configure-locally> -e MYSQL_DATABASE=learn_hub \
+  -e MYSQL_ROOT_PASSWORD=root123456 -e MYSQL_DATABASE=learn_hub \
   -p 3307:3306 mysql:8 \
   --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
 ```
@@ -225,7 +225,7 @@ curl http://localhost:18080/api/files?page=1&size=3
 
 | 现象 | 原因与解法 |
 | --- | --- |
-| 启动报 `Access denied for user 'root'@'127.0.0.1'` | 连到了**另一个项目的 MySQL**（宿主机 3306 常被占）。确认容器映射到 3307，或按 4.3 改连接 |
+| 启动报 `Access denied for user 'root'@'172.17.0.1'` | 连到了**另一个项目的 MySQL**（宿主机 3306 常被占）。确认容器映射到 3307，或按 4.3 改连接 |
 | 启动报 `Communications link failure` | MySQL 没起 / 端口不对 / 容器没映射端口（`docker port learn-hub-mysql` 为空） |
 | 后端起来了但前端接口 404 | 前端只托管了静态文件、没配 `/api` 反代（见 5.2 的 nginx 片段） |
 | `npm run dev` 报端口被占 | 5174 被别的项目占了。`strictPort` 故意不自动换端口（静默换端口会让人打开错页面）；先腾出 5174 或改 `vite.config.js` |
@@ -243,7 +243,7 @@ curl http://localhost:18080/api/files?page=1&size=3
 
 | 数据 | 在哪 | 怎么搬 |
 | --- | --- | --- |
-| 笔记 / 资料元数据 / 知识库 / 图谱 | MySQL 容器里 | `docker exec learn-hub-mysql mysqldump -uroot -p learn_hub > learn_hub.sql`，新机器 `docker exec -i learn-hub-mysql mysql -uroot -p learn_hub < learn_hub.sql` |
+| 笔记 / 资料元数据 / 知识库 / 图谱 | MySQL 容器里 | `docker exec learn-hub-mysql mysqldump -uroot -proot123456 learn_hub > learn_hub.sql`，新机器 `docker exec -i learn-hub-mysql mysql -uroot -proot123456 learn_hub < learn_hub.sql` |
 | 上传的资料原文（PDF/Word…） | `backend/uploads/`（**被 git 忽略**） | 整个目录拷过去（`.derived/` 缓存可以不带，会自动重建） |
 | AI 密钥与模型档案 | `backend/.env` + 数据库 `app_setting` / `model_profile` 表 | `.env` 手动拷；表跟着上面的 dump 一起走 |
 

@@ -179,11 +179,11 @@ owner_type, owner_key, source_type, source_id, source_hash, anchor_json
 
 ## 10. 主要改动位置
 
-- [Knowledge.vue](<project-path>)：统一搜索请求、结果排序、出处、Wiki 与图谱任务入口。
-- [KnowledgeService.java](<project-path>)、[VectorIndexService.java](<project-path>)：复用召回能力、补充块定位、改进更新顺序。
-- [AgentService.java](<project-path>)、[RagEvalService.java](<project-path>)：接入统一检索、移除共享模式字段、证据与评测记录。
-- [WikiService.java](<project-path>)、[EntityCompileService.java](<project-path>)：依赖、来源计数、生成快照、局部编译与任务。
-- [KgGraphService.java](<project-path>)、[KgOntology.java](<project-path>)：概念身份、事实审核、依赖/前置区分、推导失效。
-- [AgentPanel.vue](<project-path>)、[Dashboard.vue](<project-path>)：引用核对、学习任务与反馈。
+- [Knowledge.vue](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/frontend/src/views/Knowledge.vue)：统一搜索请求、结果排序、出处、Wiki 与图谱任务入口。
+- [KnowledgeService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/KnowledgeService.java)、[VectorIndexService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/VectorIndexService.java)：复用召回能力、补充块定位、改进更新顺序。
+- [AgentService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/ai/AgentService.java)、[RagEvalService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/RagEvalService.java)：接入统一检索、移除共享模式字段、证据与评测记录。
+- [WikiService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/WikiService.java)、[EntityCompileService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/EntityCompileService.java)：依赖、来源计数、生成快照、局部编译与任务。
+- [KgGraphService.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/KgGraphService.java)、[KgOntology.java](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/backend/src/main/java/org/dyh/learnhub/service/KgOntology.java)：概念身份、事实审核、依赖/前置区分、推导失效。
+- [AgentPanel.vue](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/frontend/src/components/AgentPanel.vue)、[Dashboard.vue](C:/Users/dyh/WorkBuddy/2026-09-07-15-46-17/learn-hub/frontend/src/views/Dashboard.vue)：引用核对、学习任务与反馈。
 
 整体完成标准是用户能找到正确原文、核对回答、识别过期内容、完成补缺任务。页面数量、图谱节点数量和模型调用次数作为运行数据记录，不作为知识库质量的成功指标。
