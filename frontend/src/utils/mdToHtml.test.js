@@ -1,34 +1,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
-import { registerHooks } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { register } from 'node:module'
 import domino from '@mixmark-io/domino'
 import { JSDOM } from 'jsdom'
 import { documentHtmlToMd } from './htmlToMd.js'
 
 // Match the two Vite import conveniences used by this module without starting a
 // dev server or loading project configuration. Production rendering is unmodified.
-const hooks = registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (specifier.endsWith('?raw')) {
-      const result = nextResolve(specifier.slice(0, -4), context)
-      return { ...result, url: `${result.url}?raw` }
-    }
-    if (specifier.startsWith('.') && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.js`, context)
-    return nextResolve(specifier, context)
-  },
-  load(url, context, nextLoad) {
-    if (!url.endsWith('?raw')) return nextLoad(url, context)
-    const css = readFileSync(fileURLToPath(url.slice(0, -4)), 'utf8')
-    return { format: 'module', source: `export default ${JSON.stringify(css)}`, shortCircuit: true }
-  },
-})
+register('../../test-fixtures/viteImportsLoader.js', import.meta.url)
 const { renderNoteHtml, renderMarkdownFragment } = await import('./mdToHtml.js')
 const dom = new JSDOM()
 globalThis.window = dom.window
 globalThis.document = dom.window.document
-test.after(() => { hooks.deregister(); dom.window.close() })
+test.after(() => dom.window.close())
 
 const flowchart = 'flowchart LR\n  A[合成输入] --> B[合成结果]\n'
 const fence = source => `\`\`\`mermaid\n${source}\`\`\``
