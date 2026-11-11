@@ -73,27 +73,35 @@ public class KgPipelineService {
     public static final class Job {
         public final String id;
         public final long startedAt = System.currentTimeMillis();
-        public long finishedAt;
-        public String stage = "排队";
-        public int percent;
-        public int total;
-        public int done;
-        public String detail = "";
+        public volatile long finishedAt;
+        public volatile String stage = "排队";
+        public volatile int percent;
+        public volatile int total;
+        public volatile int done;
+        public volatile String detail = "";
         public volatile String status = "running";
-        public String error;
-        public String model;
-        public int triples;
-        public int entities;
+        public volatile String error;
+        public volatile String model;
+        public volatile int triples;
+        public volatile int entities;
 
         Job(String id) {
             this.id = id;
         }
     }
 
-    public Map<String, Object> start() {
+    public synchronized Map<String, Object> start() {
+        for (Job existing : jobs.values()) {
+            if ("running".equals(existing.status)) return view(existing.id);
+        }
         Job job = new Job(UUID.randomUUID().toString().substring(0, 8));
         jobs.put(job.id, job);
-        runner.submit(() -> build(job));
+        try {
+            runner.submit(() -> build(job));
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            jobs.remove(job.id, job);
+            throw rejected;
+        }
         return view(job.id);
     }
 
@@ -246,23 +254,20 @@ public class KgPipelineService {
             finish(job, null);
         } catch (Exception e) {
             log.warn("概念图谱构建失败：{}", e.toString());
-            job.status = "failed";
-            job.stage = "失败";
-            job.error = e.getMessage() == null ? e.toString() : e.getMessage();
-            job.finishedAt = System.currentTimeMillis();
+            fail(job, e.getMessage() == null ? e.toString() : e.getMessage());
+        } finally {
+            if ("running".equals(job.status)) fail(job, "构建意外中断");
         }
     }
 
-    private void finish(Job job, String note) {
-        job.percent = 100;
-        job.status = "done";
-        job.stage = "完成";
-        if (note != null) {
-            job.detail = note;
-        }
+    private void fail(Job job, String error) {
+        job.stage = "失败";
+        job.error = error;
         job.finishedAt = System.currentTimeMillis();
-        log.info("概念图谱构建完成：实体 {} 个、新增三元组 {} 条、耗时 {}ms",
-                graph.nodes().size(), job.triples, job.finishedAt - job.startedAt);
+        job.status = "failed";
+    }
+
+    private void finish(Job job, String note) {
         // 图变了就顺手把社区划分刷新一遍（GraphRAG 的社区层靠它保持跟手，而不是等用户去图谱页点按钮）。
         // 只走 ifStale：新建的实体/三元组会让脏标记为真、这里必然重算；没有任何变化时它一步就返回。
         // 摘要不在这一步生成（那要花钱，且按成员指纹判重），所以这里不会产生模型调用。
@@ -277,6 +282,13 @@ public class KgPipelineService {
                 log.warn("构建后重算社区失败（不影响图谱本身）：{}", e.toString());
             }
         }
+        job.percent = 100;
+        job.stage = "完成";
+        if (note != null) job.detail = note;
+        job.finishedAt = System.currentTimeMillis();
+        log.info("概念图谱构建完成：实体 {} 个、新增三元组 {} 条、耗时 {}ms",
+                job.entities, job.triples, job.finishedAt - job.startedAt);
+        job.status = "done";
     }
 
     /** 素材：笔记 + 速查卡 + 资料正文，各自带来源标注前缀 */
