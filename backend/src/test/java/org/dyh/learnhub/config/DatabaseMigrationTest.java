@@ -14,6 +14,7 @@ import org.dyh.learnhub.mapper.CategoryMapper;
 import org.dyh.learnhub.mapper.TagMapper;
 import org.dyh.learnhub.mapper.FileInfoMapper;
 import org.dyh.learnhub.mapper.NoteMapper;
+import org.dyh.learnhub.mapper.KbChunkMapper;
 import org.dyh.learnhub.service.FolderService;
 import org.dyh.learnhub.service.NoteService;
 import org.dyh.learnhub.service.NoteContentEditor;
@@ -529,6 +530,40 @@ class DatabaseMigrationTest {
             assertThat(service.detail(note.getId()).getRevision()).isEqualTo(1L);
             assertThat(service.detail(note.getId()).getContent()).isIn("草稿 A", "草稿 B");
             assertThat(service.update(note.getId(), noteInput("旧客户端保存", null)).getRevision()).isEqualTo(2L);
+        });
+    }
+
+    @Test
+    void passageSourceHashesMatchJavaIndexBytesAcrossAllSourceTypes() {
+        String url = emptyDatabase();
+        folderApplication(url).run(context -> {
+            assertThat(context).hasNotFailed();
+            JdbcTemplate db = jdbc(url);
+            String title = "合成标题 🌱";
+            String body = "合成正文\r\n第二行";
+            String summary = "文件说明";
+            db.update("INSERT INTO note (id, title, content) VALUES (94001, ?, ?)", title, body);
+            db.update("INSERT INTO quick_ref (id, title, content) VALUES (94001, ?, ?)", title, body);
+            db.update("INSERT INTO file_info (id, origin_name, store_name, text_status, summary, text_content) "
+                    + "VALUES (94001, ?, 'demo.txt', 'ok', ?, ?), (94002, ?, 'pending.txt', 'pending', NULL, ?)",
+                    title, summary, body, title, body);
+            var mapper = context.getBean(KbChunkMapper.class);
+            String prefix = "synthetic-space\u0000false\u0000";
+            String suffix = "\u0000split:v4:synthetic";
+            var sources = mapper.passageSources(prefix, suffix);
+            assertThat(sources).hasSize(3).allSatisfy(row -> {
+                assertThat(row).doesNotContainKey("content");
+                assertThat(row.get("source_id")).isEqualTo(94001L);
+                String content = "file".equals(row.get("source_type")) ? summary + "\n" + body : body;
+                var hash = java.security.MessageDigest.getInstance("SHA-256");
+                String expected = java.util.HexFormat.of().formatHex(
+                        hash.digest((prefix + title + "\u0000" + content + suffix).getBytes(StandardCharsets.UTF_8)));
+                assertThat(row.get("content_hash")).isEqualTo(expected);
+            });
+            assertThat(mapper.noteBodies(List.of(94001L, 94002L))).containsExactly(Map.of("id", 94001L, "content", body));
+            assertThat(mapper.refBodies(List.of(94001L))).containsExactly(Map.of("id", 94001L, "content", body));
+            assertThat(mapper.fileBodies(List.of(94001L, 94002L)))
+                    .containsExactly(Map.of("id", 94001L, "content", summary + "\n" + body));
         });
     }
 

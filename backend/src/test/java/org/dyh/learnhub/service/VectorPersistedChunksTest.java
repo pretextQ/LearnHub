@@ -89,4 +89,41 @@ class VectorPersistedChunksTest {
         rows.removeLast();
         assertTrue(service.persistedChunks(List.of(document), config).isEmpty());
     }
+    @Test void snapshotLoadsOnlyChangedOrUnindexedBodiesAndSkipsDeletedSources() {
+        service.reindexChanged();
+        var valid = new java.util.LinkedHashMap<String, Object>();
+        valid.put("source_type", "file");
+        valid.put("source_id", 1L);
+        valid.put("title", document.get("title"));
+        valid.put("content_hash", saved.get().getContentHash());
+        var newNote = new java.util.LinkedHashMap<>(Map.<String, Object>of(
+                "source_type", "note", "source_id", 2L, "title", "合成笔记", "content_hash", "not-indexed"));
+        when(chunks.passageSources(anyString(), anyString())).thenReturn(List.of(valid, newNote));
+        when(chunks.noteBodies(List.of(2L))).thenReturn(List.of(Map.of("id", 2L, "content", "新笔记正文")));
+
+        clearInvocations(chunks, embedder);
+        var snapshot = service.currentPassages(config).orElseThrow();
+        assertEquals(List.of("file:1"), List.copyOf(snapshot.stored().keySet()));
+        assertEquals(rows.stream().map(KbChunk::getChunkText).toList(),
+                snapshot.stored().get("file:1").stream().map(TextChunker.Chunk::text).toList());
+        assertFalse(snapshot.sources().getFirst().containsKey("content"));
+        assertEquals("新笔记正文", snapshot.sources().getLast().get("content"));
+        verify(chunks).noteBodies(List.of(2L));
+        verify(chunks, never()).fileBodies(anyList());
+        verify(chunks, never()).allFiles();
+        verify(embedder).snapshot();
+        verifyNoMoreInteractions(embedder);
+
+        valid.put("content_hash", "changed");
+        when(chunks.fileBodies(List.of(1L))).thenReturn(List.of(Map.of("id", 1L, "content", "重新抽取的正文")));
+        snapshot = service.currentPassages(config).orElseThrow();
+        assertTrue(snapshot.stored().isEmpty());
+        assertEquals("重新抽取的正文", snapshot.sources().getFirst().get("content"));
+
+        when(chunks.passageSources(anyString(), anyString())).thenReturn(List.of(newNote));
+        snapshot = service.currentPassages(config).orElseThrow();
+        assertEquals(List.of(2L), snapshot.sources().stream().map(row -> row.get("source_id")).toList());
+        assertTrue(snapshot.stored().isEmpty());
+    }
+
 }

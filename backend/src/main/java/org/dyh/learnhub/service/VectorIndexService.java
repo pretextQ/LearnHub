@@ -19,11 +19,13 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 
 /**
  * 语义检索（向量）索引与检索。
@@ -494,10 +496,17 @@ public class VectorIndexService {
 
     private static String sourceHash(Source source, String space, boolean contextual, KnowledgeBaseSettings.Config cfg) {
         // Both structure protection and semantic settings version the persisted boundaries.
-        String parameters = "\u0000split:v4:" + cfg.indexingFingerprint();
-        return KgService.sha256(space + "\u0000" + contextual + "\u0000"
+        return KgService.sha256(hashPrefix(space, contextual)
                 + (source.title() == null ? "" : source.title()) + "\u0000"
-                + (source.text() == null ? "" : source.text()) + parameters);
+                + (source.text() == null ? "" : source.text()) + hashSuffix(cfg));
+    }
+
+    private static String hashPrefix(String space, boolean contextual) {
+        return space + "\u0000" + contextual + "\u0000";
+    }
+
+    private static String hashSuffix(KnowledgeBaseSettings.Config cfg) {
+        return "\u0000split:v4:" + cfg.indexingFingerprint();
     }
 
     private void upsertState(Source source, int chunks, EmbeddingClient.Snapshot target, boolean contextual,
@@ -731,6 +740,55 @@ public class VectorIndexService {
                                                                KnowledgeBaseSettings.Config cfg) {
         EmbeddingClient.Snapshot target = embedder.snapshot();
         if (target == null || !target.configured()) return Map.of();
+        return validatedChunks(documents, target.spaceFingerprint(), document -> {
+            Source source = new Source(str(document.get("source_type")), num(document.get("source_id")),
+                    str(document.get("title")), str(document.get("category")), str(document.get("content")));
+            return sourceHash(source, target.spaceFingerprint(), cfg.contextualEmbed(), cfg);
+        });
+    }
+
+    record PassageSnapshot(List<Map<String, Object>> sources, Map<String, List<TextChunker.Chunk>> stored) {}
+
+    /** Read hashes, index state, and any fallback bodies from the same database snapshot. */
+    @org.springframework.transaction.annotation.Transactional(readOnly = true,
+            isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public Optional<PassageSnapshot> currentPassages(KnowledgeBaseSettings.Config cfg) {
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (target == null || !target.configured()) return Optional.empty();
+        List<Map<String, Object>> documents = mapper.passageSources(
+                hashPrefix(target.spaceFingerprint(), cfg.contextualEmbed()), hashSuffix(cfg));
+        Map<String, List<TextChunker.Chunk>> stored = validatedChunks(documents, target.spaceFingerprint(),
+                row -> str(row.get("content_hash")));
+        Map<String, List<Map<String, Object>>> missing = new LinkedHashMap<>();
+        for (Map<String, Object> document : documents) {
+            String type = str(document.get("source_type"));
+            if (!stored.containsKey(KbIndexState.key(type, num(document.get("source_id")))))
+                missing.computeIfAbsent(type, ignored -> new ArrayList<>()).add(document);
+        }
+        missing.forEach((type, rows) -> {
+            for (int offset = 0; offset < rows.size(); offset += 128) {
+                List<Map<String, Object>> batch = rows.subList(offset, Math.min(offset + 128, rows.size()));
+                List<Long> ids = batch.stream().map(row -> num(row.get("source_id"))).toList();
+                var bodies = switch (type) {
+                    case "note" -> mapper.noteBodies(ids);
+                    case "quick_ref" -> mapper.refBodies(ids);
+                    case "file" -> mapper.fileBodies(ids);
+                    default -> throw new IllegalStateException("Unknown passage source: " + type);
+                };
+                Map<Long, String> content = new LinkedHashMap<>();
+                for (Map<String, Object> body : bodies) content.put(num(body.get("id")), str(body.get("content")));
+                for (Map<String, Object> document : batch) {
+                    String body = content.get(num(document.get("source_id")));
+                    if (body == null) throw new IllegalStateException("Missing fallback body for " + type);
+                    document.put("content", body);
+                }
+            }
+        });
+        return Optional.of(new PassageSnapshot(documents, stored));
+    }
+
+    private Map<String, List<TextChunker.Chunk>> validatedChunks(List<Map<String, Object>> documents, String space,
+            Function<Map<String, Object>, String> contentHash) {
         Map<String, KbIndexState> states = new LinkedHashMap<>();
         for (KbIndexState state : stateMapper.selectList(null)) states.put(state.getId(), state);
         Map<String, List<KbChunk>> stored = new LinkedHashMap<>();
@@ -741,20 +799,18 @@ public class VectorIndexService {
         for (Map<String, Object> document : documents) {
             Long id = num(document.get("source_id"));
             if (id == null) continue;
-            Source source = new Source(str(document.get("source_type")), id, str(document.get("title")),
-                    str(document.get("category")), str(document.get("content")));
-            String key = KbIndexState.key(source.type(), source.id());
+            String key = KbIndexState.key(str(document.get("source_type")), id);
             KbIndexState state = states.get(key);
             List<KbChunk> rows = stored.get(key);
             if (state == null || rows == null || state.getChunks() == null || state.getChunks() != rows.size()
-                    || !target.spaceFingerprint().equals(state.getEmbeddingSpace())
-                    || !sourceHash(source, target.spaceFingerprint(), cfg.contextualEmbed(), cfg).equals(state.getContentHash())) continue;
+                    || !space.equals(state.getEmbeddingSpace())
+                    || !contentHash.apply(document).equals(state.getContentHash())) continue;
             rows.sort(java.util.Comparator.comparingInt(row -> row.getSeq() == null ? -1 : row.getSeq()));
             boolean valid = true;
             for (int i = 0; i < rows.size(); i++) {
                 KbChunk row = rows.get(i);
                 if (row.getSeq() == null || row.getSeq() != i || row.getChunkText() == null || row.getChunkText().isBlank()
-                        || !target.spaceFingerprint().equals(row.getEmbeddingSpace())) { valid = false; break; }
+                        || !space.equals(row.getEmbeddingSpace())) { valid = false; break; }
             }
             if (valid) result.put(key, rows.stream().map(row -> new TextChunker.Chunk(str(row.getHeading()), row.getChunkText())).toList());
         }

@@ -110,22 +110,50 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
     // ---------------- 索引原料：三类来源的全文（列表 VO 不含正文，所以这里单独取） ----------------
 
     @Select("SELECT n.id AS id, n.title AS title, n.content AS content, c.name AS category "
-            + "FROM note n LEFT JOIN category c ON c.id = n.category_id "
-            + "WHERE n.content IS NOT NULL AND n.content <> ''")
+            + NOTE_FROM)
     List<Map<String, Object>> allNotes();
 
     @Select("SELECT q.id AS id, q.title AS title, q.content AS content, c.name AS category "
-            + "FROM quick_ref q LEFT JOIN category c ON c.id = q.category_id "
-            + "WHERE q.content IS NOT NULL AND q.content <> ''")
+            + REF_FROM)
     List<Map<String, Object>> allRefs();
 
-    /** 资料：把用户手填说明拼在前面 —— 说明本身也是"这份文档讲了什么"的高价值上下文 */
-    @Select("SELECT f.id AS id, f.origin_name AS title, "
-            + "CONCAT(IFNULL(f.summary, ''), CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE CHAR(10) END, "
-            + "IFNULL(f.text_content, '')) AS content, c.name AS category "
-            + "FROM file_info f LEFT JOIN category c ON c.id = f.category_id "
-            + "WHERE f.text_status = 'ok' AND f.text_content IS NOT NULL")
+    // Use exactly the same file text for indexing, source hashes and fallback chunking.
+    String FILE_BODY = "CONCAT(IFNULL(f.summary, ''), CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE CHAR(10) END, "
+            + "IFNULL(f.text_content, ''))";
+    String NOTE_FROM = "FROM note n LEFT JOIN category c ON c.id = n.category_id "
+            + "WHERE n.content IS NOT NULL AND n.content != ''";
+    String REF_FROM = "FROM quick_ref q LEFT JOIN category c ON c.id = q.category_id "
+            + "WHERE q.content IS NOT NULL AND q.content != ''";
+    String FILE_FROM = "FROM file_info f LEFT JOIN category c ON c.id = f.category_id "
+            + "WHERE f.text_status = 'ok' AND f.text_content IS NOT NULL";
+
+    /** 资料：把用户手填说明拼在前面，作为正文上下文。 */
+    @Select("SELECT f.id AS id, f.origin_name AS title, " + FILE_BODY + " AS content, c.name AS category " + FILE_FROM)
     List<Map<String, Object>> allFiles();
+
+    // Compare the current UTF-8 bytes against the existing index hash without shipping the bodies.
+    String HASH_PREFIX = "SHA2(CONCAT(CONVERT(#{prefix} USING utf8mb4), CONVERT(IFNULL(";
+    String HASH_SEPARATOR = ", '') USING utf8mb4), X'00', CONVERT(";
+    String HASH_SUFFIX = " USING utf8mb4), CONVERT(#{suffix} USING utf8mb4)), 256) AS content_hash ";
+
+    @Select("SELECT 'note' AS source_type, n.id AS source_id, n.title AS title, c.name AS category, "
+            + HASH_PREFIX + "n.title" + HASH_SEPARATOR + "n.content" + HASH_SUFFIX + NOTE_FROM
+            + " UNION ALL SELECT 'quick_ref', q.id, q.title, c.name, "
+            + HASH_PREFIX + "q.title" + HASH_SEPARATOR + "q.content" + HASH_SUFFIX + REF_FROM
+            + " UNION ALL SELECT 'file', f.id, f.origin_name, c.name, "
+            + HASH_PREFIX + "f.origin_name" + HASH_SEPARATOR + FILE_BODY + HASH_SUFFIX + FILE_FROM)
+    List<Map<String, Object>> passageSources(@Param("prefix") String prefix, @Param("suffix") String suffix);
+
+    String BODY_IDS = " IN <foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach></script>";
+
+    @Select("<script>SELECT n.id AS id, n.content AS content " + NOTE_FROM + " AND n.id" + BODY_IDS)
+    List<Map<String, Object>> noteBodies(@Param("ids") List<Long> ids);
+
+    @Select("<script>SELECT q.id AS id, q.content AS content " + REF_FROM + " AND q.id" + BODY_IDS)
+    List<Map<String, Object>> refBodies(@Param("ids") List<Long> ids);
+
+    @Select("<script>SELECT f.id AS id, " + FILE_BODY + " AS content " + FILE_FROM + " AND f.id" + BODY_IDS)
+    List<Map<String, Object>> fileBodies(@Param("ids") List<Long> ids);
 
     /** Lock and recheck the source after model extraction, before advancing an automatic graph checkpoint. */
     @Select("SELECT id, title, content FROM note WHERE id = #{id} FOR UPDATE")

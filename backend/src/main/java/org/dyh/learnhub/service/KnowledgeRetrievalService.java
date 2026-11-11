@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -299,23 +300,32 @@ public class KnowledgeRetrievalService {
         Map<String, SectionParent> parents = new LinkedHashMap<>();
         long started = System.nanoTime();
         List<Map<String, Object>> currentDocuments = new ArrayList<>();
+        Map<String, List<TextChunker.Chunk>> persisted = Map.of();
         if (documents != null) currentDocuments.addAll(documents);
         else {
-            Map<String, List<Map<String, Object>>> sourceRows = new LinkedHashMap<>();
-            sourceRows.put("note", observed(trace, "sourceNotes", "读取当前笔记", sources::allNotes));
-            sourceRows.put("quick_ref", observed(trace, "sourceRefs", "读取当前速查卡", sources::allRefs));
-            sourceRows.put("file", observed(trace, "sourceFiles", "读取当前资料正文", sources::allFiles));
-            sourceRows.forEach((type, rows) -> rows.forEach(row -> {
-                Map<String, Object> document = new LinkedHashMap<>(row);
-                document.put("source_type", type);
-                document.put("source_id", row.get("id"));
-                currentDocuments.add(document);
-            }));
-        }
-        Map<String, List<TextChunker.Chunk>> persisted = Map.of();
-        if (documents == null) {
-            try { persisted = vectors.persistedChunks(currentDocuments, cfg); }
-            catch (Exception unavailable) { log.warn("已存分块暂不可读，回退当前正文结构切块：{}", unavailable.getClass().getSimpleName()); }
+            Optional<VectorIndexService.PassageSnapshot> snapshot = Optional.empty();
+            long sourceStarted = System.nanoTime();
+            try { snapshot = vectors.currentPassages(cfg); }
+            catch (Exception unavailable) { log.warn("无法读取已存分块快照，回退当前正文：{}", unavailable.getClass().getSimpleName()); }
+            if (snapshot.isPresent()) {
+                currentDocuments.addAll(snapshot.get().sources());
+                persisted = snapshot.get().stored();
+                if (trace != null) trace.stage("sourceSnapshot", "校验当前来源", sourceStarted, currentDocuments.size(),
+                        "completed", "仅对缺少有效分块的来源读取正文");
+            } else {
+                Map<String, List<Map<String, Object>>> sourceRows = new LinkedHashMap<>();
+                sourceRows.put("note", observed(trace, "sourceNotes", "读取当前笔记", sources::allNotes));
+                sourceRows.put("quick_ref", observed(trace, "sourceRefs", "读取当前速查卡", sources::allRefs));
+                sourceRows.put("file", observed(trace, "sourceFiles", "读取当前资料正文", sources::allFiles));
+                sourceRows.forEach((type, rows) -> rows.forEach(row -> {
+                    Map<String, Object> document = new LinkedHashMap<>(row);
+                    document.put("source_type", type);
+                    document.put("source_id", row.get("id"));
+                    currentDocuments.add(document);
+                }));
+                try { persisted = vectors.persistedChunks(currentDocuments, cfg); }
+                catch (Exception unavailable) { log.warn("已存分块暂不可读，回退当前正文结构切块：{}", unavailable.getClass().getSimpleName()); }
+            }
         }
         for (Map<String, Object> row : currentDocuments)
             addSource(out, headings, parents, row, cfg, persisted, documents != null, includeParents);
