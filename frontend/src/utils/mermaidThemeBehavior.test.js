@@ -13,7 +13,7 @@ function previewHarness(render) {
   const file = new URL('../components/MermaidPreview.vue', import.meta.url)
   const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file.pathname })
   const { content } = compileScript(descriptor, { id: 'mermaid-theme-test' })
-  const script = content.replace(/^import .*\n/gm, '').replace('export default', 'return')
+  const script = content.replace(/^import [^\r\n]*\r?\n/gm, '').replace('export default', 'return')
   const mounted = [], unmounted = []
   const bindings = { computed: vue.computed, nextTick: vue.nextTick, reactive: vue.reactive, ref: vue.ref, watch: vue.watch,
     isDark, onMounted: callback => mounted.push(callback), onBeforeUnmount: callback => unmounted.push(callback),
