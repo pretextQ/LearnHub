@@ -1,0 +1,314 @@
+/**
+ * mdToHtml —— 把 Markdown 笔记渲染成「单个自包含 .html 文件」的工具
+ *
+ * 特点：
+ *  1. 离线可打开：语法高亮 CSS、正文排版样式全部内联，无任何外链请求
+ *  2. 代码高亮：highlight.js（lib/common 常用语言集，按需异步加载，不拖首屏）
+ *  3. 自动深浅色：导出文件跟随浏览器的 prefers-color-scheme
+ *  4. 组件用 `await import('./mdToHtml')` 懒加载，首次导出时才下载
+ */
+import MarkdownIt from 'markdown-it'
+import hljs from 'highlight.js/lib/common'
+// `?raw` 让 Vite 把 css 以纯文本导入，从而内联进导出文件
+import githubCss from 'highlight.js/styles/github.css?raw'
+import githubDarkCss from 'highlight.js/styles/github-dark.css?raw'
+import { fixHtmlQuotes } from './htmlQuotes'
+import mdCallout from './mdCallout'
+import mdAnchor from './mdAnchor'
+import mdMath from './mdMath'
+import { renderMermaid, mermaidFrameDocument, mermaidSvgSize } from './mermaidPreview'
+// 导出的 HTML 要能离线看公式，所以把 katex 的 CSS 也内联进去（与 hljs 的 CSS 同样处理）
+import katexCss from 'katex/dist/katex.min.css?raw'
+
+const md = new MarkdownIt({
+  html: true, // 笔记中允许少量原始 HTML（图片/表格微调等），与编辑器预览一致
+  linkify: true,
+  breaks: true, // 单个换行即 <br>，贴合 md-editor 编辑习惯
+  /**
+   * 代码块渲染成 `<pre class="hljs"><code class="language-xxx">`。
+   *
+   * **`language-xxx` 这个类不能省** —— 它是"代码块用什么语言"唯一的载体：
+   *   · 粘进编辑器时，代码块节点是从 `code.className` 里读回语言的（见 codeBlockCm 的 parseHTML）；
+   *   · 导入 HTML 时，Turndown 也按 `language-([\w+#.-]+)` 认语言（见 htmlToMd）。
+   * 早先只写 `<pre class="hljs"><code>`，于是"复制回答 → 粘进笔记"和"导出 HTML → 再导入"
+   * 都会把语言丢掉，只剩一个裸围栏（代码块没了高亮语言，语言选择器也是空的）。
+   */
+  highlight(code, lang) {
+    const esc = (s) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return `<pre class="hljs"><code class="language-${lang}">${hljs.highlight(code, { language: lang, ignoreIllegals: true }).value}</code></pre>`
+      } catch {
+        /* 高亮失败则退回纯文本 */
+      }
+    }
+    return `<pre class="hljs"><code${lang ? ` class="language-${lang}"` : ''}>${esc(code)}</code></pre>`
+  },
+})
+md.use(mdCallout) // :::名称 … ::: 彩色提示块，与编辑器预览保持一致
+md.use(mdAnchor) // 给标题加 id：手写目录 [小节](#id) 在导出文件里也能跳（与预览同一套规则）
+md.use(mdMath) // 数学公式：$…$ / $$…$$ → KaTeX（与笔记编辑器同一套插件与渲染参数）
+
+// Each export keeps its own placeholders in env. Clipboard rendering remains
+// synchronous and uses the original, source-preserving fenced-code renderer.
+const renderFence = md.renderer.rules.fence
+md.renderer.rules.fence = function (tokens, index, options, env, renderer) {
+  const fallback = renderFence(tokens, index, options, env, renderer)
+  const token = tokens[index]
+  if (!env.mermaidExports || token.info.trim().split(/\s+/)[0].toLowerCase() !== 'mermaid') return fallback
+  const marker = `<!--${env.mermaidPrefix}${env.mermaidExports.length}-->`
+  env.mermaidExports.push({ marker, source: token.content, fallback })
+  return marker
+}
+
+const EXPORT_LIGHT = { dark: false, background: '#ffffff', primary: '#e2f5f1', text: '#1f2d2a', brand: '#0e9f8e', muted: '#5a6b67' }
+const EXPORT_DARK = { dark: true, background: '#0d1117', primary: '#12332e', text: '#e6edf3', brand: '#5eead4', muted: '#8b949e' }
+
+function diagramFrame(svg, variant) {
+  const { width, height } = mermaidSvgSize(svg)
+  const theme = variant === 'dark' ? EXPORT_DARK : EXPORT_LIGHT
+  // The outer export wrapper supplies spacing. Inner fixed padding would not
+  // scale with this ratio and could crop a wide diagram in a narrow container.
+  return `<iframe class="note-mermaid-${variant}" title="Mermaid 流程图" sandbox="" loading="lazy" width="${width}" height="${height}" style="aspect-ratio:${width}/${height};max-width:${width}px" srcdoc="${escapeHtml(mermaidFrameDocument(svg, { padding: 0, dark: theme.dark, background: theme.background }))}"></iframe>`
+}
+
+async function renderExportBody(content, renderDiagram) {
+  let prefix = 'LEARNHUBMERMAIDEXPORT'
+  while (content.includes(prefix)) prefix += 'X'
+  const env = { mermaidPrefix: prefix, mermaidExports: [] }
+  let body = md.render(content, env)
+  for (const diagram of env.mermaidExports) {
+    let rendered = diagram.fallback
+    try {
+      const light = await renderDiagram(diagram.source, EXPORT_LIGHT)
+      const dark = await renderDiagram(diagram.source, EXPORT_DARK)
+      if (typeof light !== 'string' || typeof dark !== 'string' || !/^\s*<svg\b/i.test(light) || !/^\s*<svg\b/i.test(dark)) throw new Error('Invalid diagram')
+      const sourceAttr = escapeHtml(diagram.source).replace(/\r/g, '&#13;').replace(/\n/g, '&#10;').replace(/\t/g, '&#9;')
+      rendered = `<div class="note-mermaid-export" data-mermaid-source="${sourceAttr}">${diagramFrame(light, 'light')}${diagramFrame(dark, 'dark')}<pre class="note-mermaid-source" hidden><code class="language-mermaid">${escapeHtml(diagram.source)}</code></pre></div>`
+    } catch {
+      // One invalid diagram must not prevent downloading the rest of the note.
+      // Its original code block is still readable and can be edited/reimported.
+    }
+    body = body.replace(diagram.marker, () => rendered)
+  }
+  return body
+}
+
+/**
+ * 任务列表支持：`- [ ] 待办` / `- [x] 已完成` → 带勾选框的列表项
+ * 原理：markdown-it 渲染是深度优先的，list_item_open 回调执行时，
+ * 该列表项的 inline token 尚未渲染，此时改写其 children 仍有效。
+ */
+const TASK_RE = /^\[([ xX])\]\s?/
+md.renderer.rules.list_item_open = function (tokens, idx, options, env, slf) {
+  const baseLevel = tokens[idx].level
+  for (let j = idx + 1; j < tokens.length; j++) {
+    const t = tokens[j]
+    if (t.type === 'list_item_close') break
+    if (t.type === 'inline') {
+      const c0 = t.children && t.children[0]
+      if (c0 && c0.type === 'text' && TASK_RE.test(c0.content)) {
+        const m = c0.content.match(TASK_RE)
+        const checked = m[1].toLowerCase() === 'x'
+        c0.content = c0.content.slice(m[0].length)
+        t.content = t.content.slice(m[0].length)
+        t.children.unshift({
+          type: 'html_inline',
+          content: `<span class="task-check ${checked ? 'on' : ''}">${checked ? '✓' : '○'}</span>`,
+          markup: '',
+          info: '',
+          meta: null,
+          block: false,
+          hidden: false,
+        })
+      }
+      break
+    }
+  }
+  return slf.renderToken(tokens, idx, options)
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/** 笔记正文排版样式（GitHub 风格精简版，含深色自动适配） */
+const BODY_CSS = `
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  color: #1f2328;
+  background: #ffffff;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 48px 28px 72px;
+}
+.doc-head { border-bottom: 1px solid #d0d7de; padding-bottom: 20px; margin-bottom: 28px; }
+.doc-head h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.35; }
+.doc-meta { color: #6e7781; font-size: 13px; }
+.markdown-body > *:first-child { margin-top: 0; }
+/* 字号规定与 style.css 里的预览**必须同源**：从"正文 15px"出发，标题逐级 26/21/18/16/15/15，
+   h5/h6 不小于正文（用字重与颜色区分）。两边数字不一致就会变成"预览正常、导出变小/变大"，
+   这类问题极难发现，所以这里刻意写成与预览同一组数值，并注明出处。 */
+.markdown-body { font-size: 15px; }
+/* 标题默认字号优先级最高：与 style.css 的预览同源同值，且都带 !important ——
+   否则从 Word 粘进来的行内 font-size（htmlToMd 会原样保留）会把标题字号压小，
+   或者导出件与预览出现"一大一小"。预览与导出必须永远一致。 */
+.markdown-body h1, .markdown-body h2 { border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
+.markdown-body h1 { font-size: 26px !important; line-height: 1.35; font-weight: 700; margin: 1.6em 0 .6em; }
+.markdown-body h2 { font-size: 21px !important; line-height: 1.4; font-weight: 650; margin: 1.5em 0 .55em; }
+.markdown-body h3 { font-size: 18px !important; line-height: 1.45; font-weight: 650; margin: 1.4em 0 .5em; }
+.markdown-body h4 { font-size: 16px !important; line-height: 1.5; font-weight: 650; margin: 1.3em 0 .45em; }
+/* h5/h6 与正文同号：标题不该比正文还小 */
+.markdown-body h5 { font-size: 15px !important; line-height: 1.55; font-weight: 650; letter-spacing: .01em; margin: 1.2em 0 .4em; }
+.markdown-body h6 { font-size: 15px !important; line-height: 1.55; font-weight: 600; letter-spacing: .01em; color: #57606a; margin: 1.2em 0 .4em; }
+/* 标题默认字号优先级最高：标题内任何东西都不能改它。
+   必须 !important —— 行内样式优先级高于任何选择器；与 style.css 里预览那条同源，
+   两处必须一致，否则"预览里正常、导出后变小"会更难查。
+   放行 sup/sub/code：它们有正当的相对字号（上标下标、行内代码 88%），且是 em 相对值，
+   会跟着标题自动缩放；强制继承反而会把注脚标记变成标题大小。 */
+.markdown-body :is(h1, h2, h3, h4, h5, h6) :not(sup):not(sub):not(code) { font-size: inherit !important; }
+.markdown-body p { margin: .8em 0; }
+.markdown-body a { color: #0969da; text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+.markdown-body img { max-width: 100%; }
+/* 行内荧光高亮（历史笔记里的 <mark>，以及"背景颜色=荧光黄"时写的 <font style=...>）：
+   不给规则的话 mark 走浏览器默认的亮黄底+黑字，导出件在暗色阅读器里会很刺眼 */
+.markdown-body mark { background: #fff3a3; color: inherit; padding: 0 1px; border-radius: 2px; }
+.markdown-body blockquote {
+  margin: 1em 0; padding: .1em 1em; color: #57606a;
+  border-left: 4px solid #d0d7de; background: #f6f8fa;
+}
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 86%;
+  background: rgba(175,184,193,.2);
+  padding: .15em .4em; border-radius: 6px;
+}
+.markdown-body pre {
+  background: #f6f8fa; border: 1px solid #d0d7de;
+  border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+  margin: 1em 0; line-height: 1.6;
+}
+.markdown-body pre code { background: none; padding: 0; font-size: 88%; }
+.note-mermaid-export { margin: 1em 0; padding: 10px; border: 1px solid #d0d7de; border-radius: 8px; overflow-x: auto; }
+.note-mermaid-export iframe { display: block; width: 100%; height: auto; border: 0; margin: 0 auto; }
+.note-mermaid-export .note-mermaid-dark, .note-mermaid-export .note-mermaid-source { display: none; }
+.hljs { display: block; overflow-x: auto; }
+.markdown-body ul, .markdown-body ol { padding-left: 2em; margin: .6em 0; }
+.markdown-body li { margin: .25em 0; }
+.markdown-body li .task-check { display: inline-block; width: 1.2em; color: #57606a; }
+.markdown-body table {
+  border-collapse: collapse; margin: 1em 0; width: 100%;
+  display: block; overflow-x: auto;
+}
+.markdown-body th, .markdown-body td {
+  border: 1px solid #d0d7de; padding: 6px 13px;
+}
+.markdown-body th { background: #f6f8fa; font-weight: 600; }
+.markdown-body hr { border: 0; border-top: 2px solid #d8dee4; margin: 2em 0; }
+.markdown-body del { color: #6e7781; }
+/* :::名称 … ::: 彩色提示块（只用半透明底色，无左侧色条；与应用内预览保持一致） */
+.markdown-body .md-callout {
+  margin: 1em 0; padding: 10px 14px; border-radius: 8px;
+  background: rgba(144,147,153,.08);
+}
+.markdown-body .md-callout p { margin: .3em 0; }
+.markdown-body .md-callout-success { background: rgba(82,196,26,.08); }
+.markdown-body .md-callout-info, .markdown-body .md-callout-note { background: rgba(64,158,255,.08); }
+.markdown-body .md-callout-warning, .markdown-body .md-callout-attention { background: rgba(230,162,60,.1); }
+.markdown-body .md-callout-danger, .markdown-body .md-callout-error { background: rgba(245,108,108,.08); }
+.markdown-body .md-callout-tip { background: rgba(19,194,194,.08); }
+.doc-foot {
+  margin-top: 48px; padding-top: 16px; border-top: 1px solid #d0d7de;
+  color: #8c959f; font-size: 12px; text-align: center;
+}
+@media (prefers-color-scheme: dark) {
+  body { color: #e6edf3; background: #0d1117; }
+  .doc-head { border-color: #30363d; }
+  .doc-meta { color: #8b949e; }
+  .markdown-body h1, .markdown-body h2 { border-color: #21262d; }
+  .markdown-body a { color: #4493f8; }
+  .markdown-body blockquote { color: #8b949e; border-color: #30363d; background: #161b22; }
+  .markdown-body code { background: rgba(110,118,129,.25); }
+  .markdown-body pre { background: #161b22; border-color: #30363d; }
+  .note-mermaid-export { border-color: #30363d; }
+  .note-mermaid-export .note-mermaid-light { display: none; }
+  .note-mermaid-export .note-mermaid-dark { display: block; }
+  .markdown-body th { background: #161b22; }
+  .markdown-body th, .markdown-body td { border-color: #30363d; }
+  .markdown-body hr { border-color: #21262d; }
+  .markdown-body del { color: #8b949e; }
+  .doc-foot { border-color: #30363d; color: #6e7681; }
+  .markdown-body li .task-check { color: #8b949e; }
+}
+`
+
+/**
+ * 渲染整份 HTML 文档字符串
+ * @param {{ title?:string, content?:string, meta?:string }} param
+ * @returns {Promise<string>} 完整 html 文本，流程图预渲染为离线 SVG。
+ */
+export async function renderNoteHtml({ title = '', content = '', meta = '' } = {}, { renderDiagram = renderMermaid } = {}) {
+  // 与预览一致：先修复标签内弯引号，否则导出的 HTML 里 <font style=”…”> 也会显示成源码
+  const body = await renderExportBody(fixHtmlQuotes(content || ''), renderDiagram)
+  const safeTitle = escapeHtml(title.trim() || '无标题笔记')
+  const safeMeta = escapeHtml(meta)
+  const darkCssBlock = `@media (prefers-color-scheme: dark) {\n${githubDarkCss}\n}`
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${safeTitle}</title>
+<style>
+${githubCss}
+${katexCss}
+${BODY_CSS}
+${darkCssBlock}
+</style>
+</head>
+<body>
+<div class="container">
+  <header class="doc-head">
+    <h1>${safeTitle}</h1>
+    ${safeMeta ? `<div class="doc-meta">${safeMeta}</div>` : ''}
+  </header>
+  <article class="markdown-body">
+${body}
+  </article>
+  <footer class="doc-foot">由 learn-hub 笔记工作台导出 · ${escapeHtml(new Date().toLocaleString('zh-CN'))}</footer>
+</div>
+</body>
+</html>
+`
+}
+
+/**
+ * 把 Markdown 渲染成 **HTML 片段**（不带 `<!DOCTYPE>`/样式外壳）。
+ *
+ * 用途：把内容按"富文本"放进剪贴板 —— 智能体面板的「复制」同时写 text/html 与
+ * text/plain，粘到富文本编辑器（本应用的阅读模式、Word、飞书…）保留结构，
+ * 粘到源码/终端这类只认纯文本的地方仍拿到 Markdown 原文。
+ *
+ * 与 renderNoteHtml 用**同一个 markdown-it 实例**（同样的 callout/锚点规则、
+ * 同样的 highlight.js 高亮、同样 breaks:true），所以"复制贴进笔记"与"导出 HTML 再打开"
+ * 普通内容结构一致；流程图在导出文档中预渲染，剪贴板保留带语言的源码代码块，
+ * 便于块编辑器粘贴后继续编辑。这里不做 fixHtmlQuotes：那个修的是导出文件里属性引号被弯引号污染，
+ * 片段交给浏览器 DOMParser 解析，不经过那一步。
+ */
+export function renderMarkdownFragment(markdown) {
+  return md.render(String(markdown == null ? '' : markdown))
+}

@@ -1,0 +1,411 @@
+<script setup>
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { statsApi } from '../api'
+import ActivityHeatmap from '../components/ActivityHeatmap.vue'
+import StateView from '../components/StateView.vue'
+
+const router = useRouter()
+// 初始即置为 loading，避免首帧先闪一下「空状态」再被数据顶掉
+const loading = ref(true)
+const stats = ref({
+  noteTotal: 0,
+  refTotal: 0,
+  categoryTotal: 0,
+  tagTotal: 0,
+  categoryStats: [],
+  recentNotes: [],
+})
+const activityYear = ref(new Date().getFullYear())
+const activityYears = Array.from({ length: 5 }, (_, index) => activityYear.value - index)
+const activityLoading = ref(false)
+const activityError = ref(false)
+const activity = ref({ year: activityYear.value, total: 0, activeDays: 0, max: 0, days: [] })
+let activityRequestId = 0
+
+/** 总览数据加载失败原因。以前失败没有分支，卡片会显示 0 —— 那是假话，不是"暂无数据" */
+const statsError = ref('')
+/** 统计卡、最近笔记、分类分布共用同一个请求，失败时要一起收敛 */
+const statsFailed = computed(() => Boolean(statsError.value) && !loading.value)
+
+const cards = [
+  {
+    key: 'noteTotal',
+    label: '笔记',
+    icon: 'M7 3.5h7a3 3 0 0 1 3 3V20.5H7a3 3 0 0 1-3-3v-11a3 3 0 0 1 3-3Z M10 8h4M10 11.5h4M10 15h2',
+  },
+  {
+    key: 'refTotal',
+    label: '速查卡',
+    icon: 'M13 2.5 5 10.5V21.5h14V2.5h-6Zm0 0v7h6M8.5 14h7M8.5 17h5',
+  },
+  {
+    key: 'categoryTotal',
+    label: '分类',
+    icon: 'M3.5 7.5h7v13h-7zM13.5 3.5h7v17h-7zM3.5 3.5h4M20.5 3.5h0M6 11v1.5M16.5 11v1.5M16.5 7v1',
+  },
+  {
+    key: 'tagTotal',
+    label: '标签',
+    icon: 'M11 3.5 20.5 13 13 20.5 3.5 11V3.5H11Zm-3.5 3.2a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z',
+  },
+]
+
+async function load() {
+  loading.value = true
+  statsError.value = ''
+  try {
+    stats.value = await statsApi.dashboard()
+  } catch (e) {
+    statsError.value = e?.message || '请求失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadActivity(year = activityYear.value) {
+  const requestId = ++activityRequestId
+  activityLoading.value = true
+  activityError.value = false
+  activity.value = { year, total: 0, activeDays: 0, max: 0, days: [] }
+  try {
+    const result = await statsApi.activity(year)
+    if (requestId === activityRequestId) activity.value = result
+  } catch {
+    if (requestId === activityRequestId) activityError.value = true
+  } finally {
+    if (requestId === activityRequestId) activityLoading.value = false
+  }
+}
+
+function changeActivityYear(year) {
+  activityYear.value = year
+  loadActivity(year)
+}
+
+function refreshActivity() {
+  loadActivity()
+}
+
+/** 统计卡跳转目标：笔记/分类/标签都落到笔记列表页（可在那里继续筛选），速查卡去速查卡页 */
+const STAT_TARGET = { noteTotal: '/notes', refTotal: '/refs', categoryTotal: '/notes', tagTotal: '/notes' }
+function openStat(key) {
+  router.push(STAT_TARGET[key])
+}
+
+/** 问候语带日期：比一句固定的口号更像「为你而做」的工具 */
+const greeting = computed(() => {
+  const now = new Date()
+  const h = now.getHours()
+  const greet = h < 6 ? '夜深了' : h < 12 ? '早上好' : h < 18 ? '下午好' : '晚上好'
+  const week = '日一二三四五六'.charAt(now.getDay())
+  return `${greet}。${now.getMonth() + 1} 月 ${now.getDate()} 日 · 周${week}，今天也积累一点点。`
+})
+
+onMounted(() => {
+  load()
+  loadActivity()
+  window.addEventListener('lh-learning-activity-changed', refreshActivity)
+  window.addEventListener('focus', refreshActivity)
+})
+
+onBeforeUnmount(() => {
+  activityRequestId += 1
+  window.removeEventListener('lh-learning-activity-changed', refreshActivity)
+  window.removeEventListener('focus', refreshActivity)
+})
+</script>
+
+<template>
+  <div class="page" v-loading="loading">
+    <div class="head">
+      <div>
+        <h2 class="page-h2">总览</h2>
+        <p class="head-sub">{{ greeting }}</p>
+      </div>
+    </div>
+
+    <StateView
+      v-if="statsFailed"
+      state="error"
+      title="总览数据加载失败"
+      :detail="statsError"
+      action-label="重试"
+      @action="load"
+    />
+    <!-- 统计卡、最近笔记、分类分布来自同一个总览请求：要么一起有数据，要么一起失败。
+         失败时不能显示 0 或「还没有笔记」——那是把故障说成没有数据。
+         下方热力图是另一个请求，保留可见，属于局部降级。 -->
+    <div v-if="!statsFailed" class="stat-grid">
+      <el-card
+        v-for="c in cards"
+        :key="c.key"
+        shadow="never"
+        class="stat-card"
+        role="button"
+        tabindex="0"
+        :aria-label="`查看${c.label}`"
+        @click="openStat(c.key)"
+        @keydown.enter.prevent="openStat(c.key)"
+        @keydown.space.prevent="openStat(c.key)"
+      >
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path :d="c.icon" />
+          </svg>
+        </div>
+        <div class="stat-body">
+          <div class="stat-num">{{ stats[c.key] }}</div>
+          <div class="stat-label">{{ c.label }}</div>
+        </div>
+        <div class="stat-glow"></div>
+      </el-card>
+    </div>
+
+    <ActivityHeatmap
+      :activity="activity"
+      :year="activityYear"
+      :years="activityYears"
+      :loading="activityLoading"
+      :error="activityError"
+      @year-change="changeActivityYear"
+      @retry="loadActivity()"
+    />
+
+    <div v-if="!statsFailed" class="lower">
+      <el-card shadow="never" class="lower-card">
+        <template #header>
+          <div class="card-head">
+            <span class="card-title">最近更新的笔记</span>
+            <el-link type="primary" @click="router.push('/notes')">查看全部</el-link>
+          </div>
+        </template>
+        <el-table :data="stats.recentNotes" size="small" @row-click="(row) => router.push(`/notes/${row.id}`)" class="recent-table">
+          <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="categoryName" label="分类" width="110">
+            <template #default="{ row }">
+              <el-tag v-if="row.categoryName" size="small" effect="plain" class="cat-tag">{{ row.categoryName }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="updatedAt" label="更新时间" width="170">
+            <template #default="{ row }">
+              <span class="time-cell">{{ (row.updatedAt || '').replace('T', ' ').slice(0, 16) }}</span>
+            </template>
+          </el-table-column>
+          <template #empty>
+            <el-empty description="还没有笔记" :image-size="70" />
+          </template>
+        </el-table>
+      </el-card>
+
+      <el-card shadow="never" class="lower-card dist">
+        <template #header>
+          <span class="card-title">分类分布</span>
+        </template>
+        <div v-for="s in stats.categoryStats" :key="s.id" class="cat-row">
+          <span class="cat-name">{{ s.name }}</span>
+          <div class="cat-bar-wrap">
+            <div class="cat-bar" :style="{ width: Math.min(100, (s.noteCount + s.refCount) * 18) + '%' }"></div>
+          </div>
+          <span class="cat-count">{{ s.noteCount + s.refCount }}</span>
+        </div>
+        <el-empty v-if="!stats.categoryStats.length" description="暂无分类" :image-size="60" />
+      </el-card>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.head-sub {
+  margin: 5px 0 0;
+  font-size: 13px;
+  color: var(--app-text-3);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.stat-card {
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 键盘焦点环走内描边，避免被 overflow:hidden 裁掉 */
+.stat-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md) !important;
+  border-color: color-mix(in srgb, var(--app-brand) 22%, var(--app-border));
+}
+
+.stat-card :deep(.el-card__body) {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+  position: relative;
+  z-index: 1;
+  /* Element Plus 给卡片 body 默认设了 overflow: auto，而 .stat-glow 是刻意伸出右边缘
+     34px 的装饰圆 —— 两者相撞，每张统计卡底部就会多出一条横向滚动条（实测 scrollWidth
+     比 clientWidth 正好多 34px）。卡片根节点本来就有 overflow: hidden，这里把 body 也
+     压成 hidden：只是去掉滚动条，圆仍按卡片边界裁切，视觉完全一致。 */
+  overflow: hidden;
+}
+
+.stat-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: transform var(--dur) var(--ease);
+}
+
+.stat-card:hover .stat-icon {
+  transform: scale(1.06);
+}
+
+.stat-num {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--app-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 12.5px;
+  color: var(--app-text-2);
+  margin-top: 6px;
+}
+
+.stat-glow {
+  position: absolute;
+  right: -34px;
+  top: -34px;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  /* 刻意比 --app-brand-glow 更淡：四张卡各挂一个圆，重了就像模板贴花 */
+  background: color-mix(in srgb, var(--app-brand) 7%, transparent);
+  transition: transform var(--dur-slow) var(--ease);
+}
+
+.stat-card:hover .stat-glow {
+  transform: scale(1.35);
+}
+
+.lower {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 16px;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-1);
+}
+
+.recent-table {
+  cursor: pointer;
+}
+
+.cat-tag {
+  --el-tag-text-color: var(--app-text-2);
+  --el-tag-bg-color: var(--app-bg);
+  --el-tag-border-color: var(--app-border);
+}
+
+.time-cell {
+  font-size: 12.5px;
+  color: var(--app-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 13px;
+  font-size: 13px;
+}
+
+.cat-name {
+  width: 78px;
+  flex-shrink: 0;
+  color: var(--app-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cat-bar-wrap {
+  flex: 1;
+  height: 6px;
+  background: var(--app-code-bg);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.cat-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--app-brand), var(--app-brand-deep));
+  border-radius: 99px;
+  transition: width 0.5s var(--ease);
+  min-width: 4px;
+}
+
+.cat-count {
+  width: 20px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1100px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .lower {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .stat-card :deep(.el-card__body) { padding: 14px; }
+}
+</style>

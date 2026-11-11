@@ -1,0 +1,665 @@
+package org.dyh.learnhub.service;
+
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.dyh.learnhub.ai.AgentProgressDetails;
+import org.dyh.learnhub.entity.AgentEvent;
+import org.dyh.learnhub.entity.AgentPendingAction;
+import org.dyh.learnhub.entity.AgentSession;
+import org.dyh.learnhub.mapper.AgentEventMapper;
+import org.dyh.learnhub.mapper.AgentPendingActionMapper;
+import org.dyh.learnhub.mapper.AgentSessionMapper;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+/**
+ * 智能体会话：事件日志的读写与「投影」。
+ *
+ * <h3>为什么要有这一层</h3>
+ * 原来后端是**完全无状态**的：对话历史由前端把最近 12 条整体带回来，超出的直接丢弃。
+ * 后果有三个：① 刷新页面就丢上下文；② 老消息无声消失，模型会突然"忘事"；
+ * ③ 后端没有任何审计线索。改为「事件落库 + 按需投影」后，这三件事一起解决。
+ *
+ * <h3>事件 ≠ 上下文</h3>
+ * 落库的事件是**全量**的（含每次工具调用与结果），但发给模型的上下文是**投影**：
+ * <ul>
+ *   <li>只取 user / assistant 的最终文本；</li>
+ *   <li><b>不回放工具调用与工具结果</b> —— 一次 search_knowledge 就可能带回几万字的笔记片段，
+ *       回放会让每轮上下文被撑爆，收益远小于成本；工具事件留在库里供审计与界面回看。</li>
+ *   <li>只取最近 {@link #PROJECTION_ROUNDS} 轮；更早的内容由 summary 事件承担（见 {@link #latestSummary}）。</li>
+ * </ul>
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class AgentSessionService {
+
+    private final AgentSessionMapper sessionMapper;
+    private final AgentEventMapper eventMapper;
+    private final AgentPendingActionMapper actionMapper;
+    private final LearningActivityService learningActivity;
+
+    /** 投影给模型的最近轮数（一轮 = 一问一答），再早的靠摘要兜 */
+    public static final int PROJECTION_ROUNDS = 8;
+
+    /** 会话标题取首条用户消息的前 N 个字符 */
+    private static final int TITLE_LEN = 30;
+
+    /** 角色常量：只在这里定义一次，避免各处字符串写错 */
+    public static final String ROLE_USER = "user";
+    public static final String ROLE_ASSISTANT = "assistant";
+    public static final String ROLE_TOOL = "tool";
+    public static final String ROLE_SUMMARY = "summary";
+    /** Hidden semantic working memory; it is neither a conversation turn nor a tool result. */
+    public static final String ROLE_TASK_MEMORY = "task_memory";
+    public static final int MAX_TASK_MEMORY_CHARS = 40_000;
+    /** Factual UI process snapshots, kept out of the user/assistant model projection. */
+    public static final String ROLE_PROGRESS = "progress";
+    public static final String ROLE_REPLY_ACTIONS = "reply_actions";
+    private static final com.fasterxml.jackson.databind.ObjectMapper DISPLAY_JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    /**
+     * 思考过程（thinking 模型返回的 reasoning_content）。
+     * <p>
+     * <b>刻意独立成一种角色</b>，而不是拼进 assistant 正文：
+     * <ul>
+     *   <li>模型投影只取 user/assistant（见 {@link #turns}），所以历史思考**不会被再喂回模型** ——
+     *       思考文本很长，回灌只会把请求体撑大（实测：长会话 + 思考回传很容易撞上服务端 413）；</li>
+     *   <li>界面按角色分开渲染，思考可以折叠、可以整体隐藏，正文不受影响。</li>
+     * </ul>
+     */
+    public static final String ROLE_REASONING = "reasoning";
+
+    /**
+     * 取会话；不存在则创建。
+     * <p>
+     * 传了 sessionId 但库里查不到（清过库、换了浏览器、导出了旧数据）时，
+     * **沿用这个 id 新建**而不是另发一个 —— 前端不必感知，它的 localStorage 里那个 id 继续有效。
+     *
+     * @param sessionId 前端带来的会话 id，可为空（空 = 开新会话）
+     * @param noteId    发起时所在的笔记 id，可为空
+     * @param firstText 首条用户消息，用于生成标题
+     * @return 实际使用的会话 id
+     */
+    public String ensure(String sessionId, Long noteId, String firstText) {
+        if (StringUtils.hasText(sessionId)) {
+            AgentSession exists = sessionMapper.selectById(sessionId);
+            if (exists != null) {
+                return exists.getId();
+            }
+            return create(sessionId, noteId, firstText);
+        }
+        return create(UUID.randomUUID().toString(), noteId, firstText);
+    }
+
+    private String create(String id, Long noteId, String firstText) {
+        AgentSession s = new AgentSession();
+        s.setId(id);
+        s.setNoteId(noteId);
+        s.setTitle(title(firstText));
+        sessionMapper.insert(s);
+        log.info("新建智能体会话 {}（标题：{}）", id, s.getTitle());
+        return id;
+    }
+
+    // ------------------------------------------------------------------
+    // 会话管理：列表 / 新建 / 改标题 / 换模型 / 删除
+    // ------------------------------------------------------------------
+
+    /**
+     * 会话列表（按最后活动时间倒序）。
+     * <p>右边栏要用它做"新开不同会话"的入口。带出消息条数与会话自己的模型档案，
+     * 这样列表上就能显示"这条会话用的是哪个模型"。
+     */
+    public List<Map<String, Object>> list(int limit) {
+        List<AgentSession> rows = sessionMapper.selectList(Wrappers.<AgentSession>lambdaQuery()
+                .orderByDesc(AgentSession::getUpdatedAt)
+                .last("LIMIT " + Math.max(1, Math.min(200, limit))));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (AgentSession s : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", s.getId());
+            m.put("title", s.getTitle());
+            m.put("noteId", s.getNoteId());
+            m.put("modelProfileId", s.getModelProfileId());
+            m.put("updatedAt", s.getUpdatedAt() == null ? null : String.valueOf(s.getUpdatedAt()).replace('T', ' '));
+            m.put("createdAt", s.getCreatedAt() == null ? null : String.valueOf(s.getCreatedAt()).replace('T', ' '));
+            Long n = eventMapper.selectCount(Wrappers.<AgentEvent>lambdaQuery()
+                    .eq(AgentEvent::getSessionId, s.getId()));
+            m.put("events", n == null ? 0 : n.intValue());
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** 显式新建一个空会话（界面上点"新对话"） */
+    public Map<String, Object> createNew(String title, String modelProfileId) {
+        String id = UUID.randomUUID().toString();
+        AgentSession s = new AgentSession();
+        s.setId(id);
+        s.setTitle(StringUtils.hasText(title) ? title(title) : "新对话");
+        s.setModelProfileId(StringUtils.hasText(modelProfileId) ? modelProfileId.trim() : null);
+        sessionMapper.insert(s);
+        log.info("新建智能体会话 {}（模型档案：{}）", id, s.getModelProfileId());
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", id);
+        m.put("title", s.getTitle());
+        m.put("modelProfileId", s.getModelProfileId());
+        m.put("events", 0);
+        return m;
+    }
+
+    /** 改标题 */
+    public void rename(String sessionId, String title) {
+        AgentSession s = sessionMapper.selectById(sessionId);
+        if (s == null) {
+            throw new IllegalArgumentException("会话不存在：" + sessionId);
+        }
+        s.setTitle(title(title));
+        sessionMapper.updateById(s);
+    }
+
+    /** 指定本会话用哪个模型档案（空 = 跟随分工表） */
+    public void setModelProfile(String sessionId, String profileId) {
+        AgentSession s = sessionMapper.selectById(sessionId);
+        if (s == null) {
+            throw new IllegalArgumentException("会话不存在：" + sessionId);
+        }
+        s.setModelProfileId(StringUtils.hasText(profileId) ? profileId.trim() : null);
+        sessionMapper.updateById(s);
+    }
+
+    /** 本会话指定的模型档案（没有则 null = 跟随分工表） */
+    public String modelProfileOf(String sessionId) {
+        if (!StringUtils.hasText(sessionId)) {
+            return null;
+        }
+        AgentSession s = sessionMapper.selectById(sessionId);
+        return s == null ? null : s.getModelProfileId();
+    }
+
+    /** 标题：压平换行、截断到 TITLE_LEN，空消息给个兜底名 */
+    private static String title(String text) {
+        if (!StringUtils.hasText(text)) {
+            return "新对话";
+        }
+        String t = text.replaceAll("\\s+", " ").trim();
+        return t.length() <= TITLE_LEN ? t : t.substring(0, TITLE_LEN) + "…";
+    }
+
+    /** 追加一条事件（append-only），并顺带把会话的 updated_at 推到当前时间 */
+    public void append(String sessionId, String role, String content, String toolName, String toolCallId) {
+        append(sessionId, role, content, toolName, toolCallId, null, null);
+    }
+
+    /**
+     * 同上，但把**token 用量与 finish_reason** 一起落库。
+     *
+     * <p>为什么值得存：{@code agent_event.tokens} 这一列以前一直是 NULL，
+     * 于是"回答是不是被输出上限截断了"这种问题**在库里查不到任何证据** ——
+     * 只能事后猜（实测被问过一次）。存下来之后，一条 SQL 就能回答：
+     * {@code SELECT id, tokens, finish_reason FROM agent_event WHERE finish_reason='length'}。
+     *
+     * @param tokens      本次输出 token 总数（含思考）；未知传 null
+     * @param finishReason {@code stop} / {@code length} / {@code tool_calls}；未知传 null
+     */
+    public void append(String sessionId, String role, String content, String toolName, String toolCallId,
+                       Integer tokens, String finishReason) {
+        AgentEvent e = new AgentEvent();
+        e.setSessionId(sessionId);
+        e.setRole(role);
+        e.setContent(content);
+        e.setToolName(toolName);
+        e.setToolCallId(toolCallId);
+        e.setTokens(tokens);
+        e.setFinishReason(finishReason);
+        eventMapper.insert(e);
+        if (ROLE_USER.equals(role)) learningActivity.record("agent_event", e.getId());
+        sessionMapper.touch(sessionId);
+    }
+
+    /** 该会话的全部事件，按时间正序 */
+    public List<AgentEvent> allEvents(String sessionId) {
+        return eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
+                .eq(AgentEvent::getSessionId, sessionId)
+                .orderByAsc(AgentEvent::getId));
+    }
+
+    /**
+     * 最近的 summary 事件内容（没有则返回 null）。
+     */
+    public String latestSummary(String sessionId) {
+        List<AgentEvent> rows = eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
+                .eq(AgentEvent::getSessionId, sessionId)
+                .eq(AgentEvent::getRole, ROLE_SUMMARY)
+                .orderByDesc(AgentEvent::getId)
+                .last("LIMIT 1"));
+        return rows.isEmpty() ? null : rows.get(0).getContent();
+    }
+
+    /** Latest durable working memory for this session; reading never changes conversation coverage. */
+    public String latestTaskMemory(String sessionId) {
+        if (!StringUtils.hasText(sessionId)) return null;
+        List<AgentEvent> rows = eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
+                .eq(AgentEvent::getSessionId, sessionId)
+                .eq(AgentEvent::getRole, ROLE_TASK_MEMORY)
+                .orderByDesc(AgentEvent::getId)
+                .last("LIMIT 1"));
+        return rows.isEmpty() ? null : rows.getFirst().getContent();
+    }
+
+    /** Save only a complete bounded memory; do not silently truncate semantic facts. */
+    public void appendTaskMemory(String sessionId, String text) {
+        if (text != null && text.length() > MAX_TASK_MEMORY_CHARS)
+            throw new IllegalArgumentException("工作记忆不能超过 " + MAX_TASK_MEMORY_CHARS + " 字符");
+        if (!StringUtils.hasText(text)) return;
+        if (!StringUtils.hasText(sessionId)) throw new IllegalArgumentException("工作记忆的会话编号不能为空");
+        append(sessionId, ROLE_TASK_MEMORY, text, null, null);
+    }
+
+    private static final String SUMMARY_WATERMARK_PREFIX = "summary-through:";
+
+    /** Keep summary prose display-compatible while recording exactly which conversation event it covers. */
+    public void appendSummary(String sessionId, String text, long coveredThroughEventId) {
+        if (coveredThroughEventId <= 0 || !StringUtils.hasText(text)) {
+            throw new IllegalArgumentException("摘要正文和已覆盖事件编号不能为空");
+        }
+        append(sessionId, ROLE_SUMMARY, text, null, SUMMARY_WATERMARK_PREFIX + coveredThroughEventId);
+    }
+
+    /** The summary event's own id is later than recent, uncompressed turns and is not a valid watermark. */
+    private Long latestSummaryCoveredEventId(String sessionId) {
+        List<AgentEvent> rows = eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
+                .eq(AgentEvent::getSessionId, sessionId)
+                .eq(AgentEvent::getRole, ROLE_SUMMARY)
+                .orderByDesc(AgentEvent::getId)
+                .last("LIMIT 1"));
+        if (rows.isEmpty()) return null;
+        AgentEvent summary = rows.getFirst();
+        String marker = summary.getToolCallId();
+        // Old summaries contain no coverage metadata. Recompact conservatively rather than
+        // guessing that every event preceding the summary has already been summarized.
+        if (marker == null || !marker.startsWith(SUMMARY_WATERMARK_PREFIX)) return null;
+        try {
+            long id = Long.parseLong(marker.substring(SUMMARY_WATERMARK_PREFIX.length()));
+            return id > 0 && (summary.getId() == null || id < summary.getId()) ? id : null;
+        } catch (NumberFormatException ignored) { return null; }
+    }
+
+    /** 一次压缩最少要覆盖多少条事件 —— 太小会导致「每轮都触发一次摘要」 */
+    public static final int COMPACT_MIN_EVENTS = 8;
+
+    /**
+     * 算出这一轮需要被压缩的事件：**已滑出投影窗口、且尚未被摘要覆盖**的那部分。
+     *
+     * <p>空列表 = 本轮不用压缩。这里刻意留了迟滞（{@link #COMPACT_MIN_EVENTS}）：
+     * 否则一旦总轮数超过窗口，就会每轮都触发一次摘要调用，平白多一次模型往返。
+     * 未达到阈值的最多七条溢出消息仍由 projection 带给模型，不会在等待压缩期间消失。
+     *
+     * @param rounds 投影窗口轮数（与 {@link #projection} 保持一致）
+     */
+    public List<AgentEvent> pendingCompaction(String sessionId, int rounds) {
+        List<AgentEvent> turns = turns(sessionId);
+        int keep = Math.max(2, rounds * 2);
+        if (turns.size() <= keep) {
+            return List.of();
+        }
+        List<AgentEvent> older = turns.subList(0, turns.size() - keep);
+        Long watermark = latestSummaryCoveredEventId(sessionId);
+        List<AgentEvent> uncovered = new ArrayList<>();
+        for (AgentEvent e : older) {
+            if (watermark == null || e.getId() > watermark) {
+                uncovered.add(e);
+            }
+        }
+        return uncovered.size() >= COMPACT_MIN_EVENTS ? uncovered : List.of();
+    }
+
+    /** 会话里全部 user/assistant 事件（时间正序），投影与压缩共用 */
+    private List<AgentEvent> turns(String sessionId) {
+        return eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
+                .eq(AgentEvent::getSessionId, sessionId)
+                .in(AgentEvent::getRole, List.of(ROLE_USER, ROLE_ASSISTANT))
+                .orderByAsc(AgentEvent::getId));
+    }
+
+    /**
+     * 投影出「模型可见的历史」：最近 {@code rounds} 轮的一问一答，不含工具事件。
+     * <p>
+     * 刻意不做的事：不回放 role=tool 的事件（理由见类注释）；
+     * 不做"保留开头、丢弃中间"那种花样截断 —— 要保留更早的信息就靠摘要，不靠猜。
+     *
+     * @return 按时间正序的 user/assistant 事件
+     */
+    public List<AgentEvent> projection(String sessionId, int rounds) {
+        List<AgentEvent> all = turns(sessionId);
+        int max = Math.max(2, rounds * 2); // 一轮 = 一问一答
+        if (all.size() <= max) {
+            return all;
+        }
+        int recentStart = all.size() - max;
+        Long watermark = latestSummaryCoveredEventId(sessionId);
+        List<AgentEvent> awaitingCompaction = new ArrayList<>();
+        for (int index = 0; index < recentStart; index++) {
+            AgentEvent event = all.get(index);
+            if (watermark == null || event.getId() > watermark) awaitingCompaction.add(event);
+        }
+        // Normally this contains 0–7 events: the caller compacts once eight accumulate.
+        // Keep a strict bound even if a legacy session or a failed compaction has a large backlog.
+        int from = Math.max(0, awaitingCompaction.size() - (COMPACT_MIN_EVENTS - 1));
+        List<AgentEvent> projection = new ArrayList<>(awaitingCompaction.subList(from, awaitingCompaction.size()));
+        projection.addAll(all.subList(recentStart, all.size()));
+        return projection;
+    }
+
+    /**
+     * 界面回看：把事件还原成「气泡列表」，并把落在问答之间的工具事件挂到该轮回答上。
+     * <p>
+     * 这是"投影"的另一个用途 —— 同一条事件流，模型看到的是精简问答，界面看到的是带工具角标的过程。
+     */
+    public List<Map<String, Object>> messagesForDisplay(String sessionId) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        List<String> pendingTools = new ArrayList<>();
+        String pendingReasoning = "";
+        Map<String, Object> pendingProgress = Map.of();
+        List<Map<String, Object>> pendingReplyActions = List.of();
+        for (AgentEvent e : allEvents(sessionId)) {
+            switch (e.getRole()) {
+                case ROLE_USER -> {
+                    // A failed/interrupted round may have milestones and staged actions without an answer.
+                    if (!pendingProgress.isEmpty() || !pendingTools.isEmpty() || StringUtils.hasText(pendingReasoning)) {
+                        Map<String, Object> interrupted = bubble(ROLE_ASSISTANT, "", new ArrayList<>(pendingTools), pendingReasoning);
+                        interrupted.putAll(pendingProgress);
+                        out.add(interrupted);
+                    }
+                    pendingTools.clear();
+                    pendingReasoning = "";
+                    pendingProgress = Map.of();
+                    pendingReplyActions = List.of();
+                    out.add(bubble(ROLE_USER, e.getContent(), List.of(), ""));
+                }
+                case ROLE_TOOL -> {
+                    if (StringUtils.hasText(e.getContent())) {
+                        // Confirm/cancel events arrive after the answer; retain them on that same round.
+                        if (!out.isEmpty() && ROLE_ASSISTANT.equals(out.getLast().get("role"))) {
+                            List<String> saved = new ArrayList<>((List<String>) out.getLast().get("events"));
+                            saved.add(e.getContent());
+                            out.getLast().put("events", saved);
+                            out.getLast().put("toolUsed", true);
+                        } else pendingTools.add(e.getContent());
+                    }
+                }
+                case ROLE_REASONING -> pendingReasoning = nullTo(e.getContent());
+                case ROLE_REPLY_ACTIONS -> {
+                    try {
+                        if (e.getContent() == null || e.getContent().length() > 10_000) break;
+                        var data = DISPLAY_JSON.readTree(e.getContent());
+                        Long boundNote = data.path("noteId").isIntegralNumber() && data.path("noteId").asLong() > 0
+                                ? data.path("noteId").asLong() : null;
+                        var actions = ReplyActions.sanitize(data.path("actions"), boundNote, data.path("truncated").asBoolean());
+                        if (!out.isEmpty() && ROLE_ASSISTANT.equals(out.getLast().get("role"))) out.getLast().put("replyActions", actions);
+                        else pendingReplyActions = actions;
+                    } catch (Exception ignored) { /* Invalid suggestions cannot break history. */ }
+                }
+                case ROLE_PROGRESS -> {
+                    Map<String, Object> parsed = displayProgress(e.getContent());
+                    if (!parsed.isEmpty()) {
+                        if (!out.isEmpty() && ROLE_ASSISTANT.equals(out.getLast().get("role"))) out.getLast().putAll(parsed);
+                        else pendingProgress = parsed;
+                    }
+                }
+                case ROLE_ASSISTANT -> {
+                    Map<String, Object> answer = bubble(ROLE_ASSISTANT, e.getContent(), new ArrayList<>(pendingTools), pendingReasoning);
+                    answer.putAll(pendingProgress);
+                    answer.put("replyActions", pendingReplyActions);
+                    out.add(answer);
+                    pendingTools.clear();
+                    pendingReasoning = "";
+                    pendingProgress = Map.of();
+                    pendingReplyActions = List.of();
+                }
+                default -> {
+                    // summary 是给模型用的内部事件，不在界面出现
+                }
+            }
+        }
+        // 思考落库了但这一轮没等到回答（超时/报错）：别把思考吞掉，单独挂一条气泡
+        if (StringUtils.hasText(pendingReasoning) || !pendingProgress.isEmpty() || !pendingTools.isEmpty()) {
+            Map<String, Object> interrupted = bubble(ROLE_ASSISTANT, "", new ArrayList<>(pendingTools), pendingReasoning);
+            interrupted.putAll(pendingProgress);
+            out.add(interrupted);
+        }
+        resolveProgressActions(sessionId, out);
+        return out;
+    }
+
+    /** Approval status can change after the round was saved; resolve it when history is read. */
+    @SuppressWarnings("unchecked")
+    private void resolveProgressActions(String sessionId, List<Map<String, Object>> messages) {
+        Map<Long, List<Map<String, Object>>> waiting = new LinkedHashMap<>();
+        for (Map<String, Object> message : messages) {
+            for (Map<String, Object> row : (List<Map<String, Object>>) message.getOrDefault("progress", List.of())) {
+                if (("waiting".equals(row.get("status")) || "running".equals(row.get("status")))
+                        && row.get("actionId") instanceof Number number)
+                    waiting.computeIfAbsent(number.longValue(), ignored -> new ArrayList<>()).add(row);
+            }
+        }
+        if (waiting.isEmpty()) return;
+        List<AgentPendingAction> actions = actionMapper.selectBatchIds(waiting.keySet());
+        if (actions == null) return;
+        for (AgentPendingAction action : actions) {
+            if (!sessionId.equals(action.getSessionId()) || !waiting.containsKey(action.getId())) continue;
+            String status = action.getStatus();
+            String progressStatus = switch (status == null ? "" : status) {
+                case "pending" -> "waiting";
+                case "executing" -> "running";
+                case "approved", "rejected" -> "completed";
+                case "failed" -> "error";
+                default -> null;
+            };
+            if (progressStatus == null) continue;
+            String detail = switch (status) {
+                case "pending" -> "等待确认执行";
+                case "executing" -> "正在执行，请勿重复确认";
+                case "approved" -> "已确认执行";
+                case "rejected" -> "已取消，本项未执行";
+                default -> "执行失败，请根据会话中的说明重试";
+            };
+            for (Map<String, Object> row : waiting.get(action.getId())) {
+                row.put("status", progressStatus);
+                row.put("detail", detail);
+            }
+        }
+    }
+
+    private static Map<String, Object> bubble(String role, String content, List<String> events, String reasoning) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("role", role);
+        m.put("content", content == null ? "" : content);
+        m.put("events", events);
+        m.put("reasoning", reasoning == null ? "" : reasoning);
+        m.put("toolUsed", !events.isEmpty());
+        m.put("progress", List.of());
+        m.put("replyActions", List.of());
+        return m;
+    }
+
+    /** A corrupt/old snapshot must not hide the rest of the conversation. */
+    private static Map<String, Object> displayProgress(String raw) {
+        // Bounded operation previews and source lists also belong to the saved display snapshot.
+        if (raw == null || raw.length() > 3_000_000) return Map.of();
+        try {
+            var node = DISPLAY_JSON.readTree(raw);
+            if (node == null || !node.path("progress").isArray()) return Map.of();
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (var item : node.path("progress")) {
+                if (rows.size() >= 160) break;
+                if (!item.isObject() || !item.path("id").isTextual()
+                        || !List.of("phase", "tool", "update", "plan").contains(item.path("kind").asText())
+                        || !List.of("pending", "running", "completed", "cancelled", "error", "waiting").contains(item.path("status").asText())) continue;
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (String key : List.of("id", "kind", "status", "title", "detail", "toolName", "parentId", "at")) {
+                    if (item.path(key).isTextual()) {
+                        String value = item.path(key).asText();
+                        row.put(key, value.length() > 500 ? value.substring(0, 500) : value);
+                    }
+                }
+                if (item.path("elapsedMs").canConvertToLong()) row.put("elapsedMs", Math.max(0, item.path("elapsedMs").asLong()));
+                if (item.path("actionId").canConvertToLong() && item.path("actionId").asLong() > 0)
+                    row.put("actionId", item.path("actionId").asLong());
+                row.putAll(AgentProgressDetails.displayDetails(item));
+                rows.add(row);
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("progress", rows);
+            if (node.path("elapsedMs").canConvertToLong()) result.put("elapsedMs", Math.max(0, node.path("elapsedMs").asLong()));
+            return result;
+        } catch (Exception ignored) { return Map.of(); }
+    }
+
+    private static String nullTo(String s) {
+        return s == null ? "" : s;
+    }
+
+    /** 会话元信息（不存在返回 null） */
+    public AgentSession get(String sessionId) {
+        return StringUtils.hasText(sessionId) ? sessionMapper.selectById(sessionId) : null;
+    }
+
+    /** 删除会话及其事件（界面上"清空对话"用） */
+    public void delete(String sessionId) {
+        eventMapper.deleteBySessionId(sessionId);
+        actionMapper.deleteBySessionId(sessionId);
+        sessionMapper.deleteById(sessionId);
+    }
+
+    // ------------------------------------------------------------------
+    // 待确认的写操作（审批）
+    // ------------------------------------------------------------------
+
+    /**
+     * 把一个写操作挂成"待确认"。
+     * <p>{@code argsJson} 原样保存：确认时按这份参数执行，不重新推导 ——
+     * 否则用户在确认前又聊了几轮，实际执行的参数可能已经不是他看到的那一份。
+     */
+    public AgentPendingAction stageAction(String sessionId, String toolName, String argsJson, String summary) {
+        AgentPendingAction a = new AgentPendingAction();
+        a.setSessionId(sessionId);
+        a.setToolName(toolName);
+        a.setArgsJson(argsJson);
+        a.setSummary(summary);
+        a.setStatus("pending");
+        actionMapper.insert(a);
+        log.info("写操作进入待确认：{}（{}）", summary, toolName);
+        return a;
+    }
+
+    /** Unfinished actions, including an approval still executing after a disconnected response. */
+    public List<AgentPendingAction> pendingActions(String sessionId) {
+        return actionMapper.selectList(Wrappers.<AgentPendingAction>lambdaQuery()
+                .eq(AgentPendingAction::getSessionId, sessionId)
+                .in(AgentPendingAction::getStatus, List.of("pending", "executing"))
+                .orderByAsc(AgentPendingAction::getId));
+    }
+
+    public AgentPendingAction getAction(Long id) {
+        return actionMapper.selectById(id);
+    }
+
+    /** Only the winner of the pending→executing transition may perform the stored side effect. */
+    public AgentPendingAction claimAction(Long id) {
+        AgentPendingAction action = getAction(id);
+        if (action == null) throw new IllegalArgumentException("待确认操作不存在: " + id);
+        if (!"pending".equals(action.getStatus())) throw new IllegalStateException("该操作已处理或正在执行，不能重复执行");
+        AgentPendingAction claimed = new AgentPendingAction();
+        claimed.setStatus("executing");
+        int changed = actionMapper.update(claimed, Wrappers.<AgentPendingAction>lambdaUpdate()
+                .eq(AgentPendingAction::getId, id).eq(AgentPendingAction::getStatus, "pending"));
+        if (changed != 1) throw new IllegalStateException("该操作已处理或正在执行，不能重复执行");
+        action.setStatus("executing");
+        return action;
+    }
+
+    /** A terminal transition cannot overwrite a concurrent approval, cancellation, or completed action. */
+    public void resolveAction(Long id, String status) {
+        String expected = switch (status) {
+            case "approved", "failed" -> "executing";
+            case "rejected" -> "pending";
+            default -> throw new IllegalArgumentException("无效的操作结果状态");
+        };
+        AgentPendingAction a = new AgentPendingAction();
+        a.setStatus(status);
+        a.setResolvedAt(LocalDateTime.now());
+        int changed = actionMapper.update(a, Wrappers.<AgentPendingAction>lambdaUpdate()
+                .eq(AgentPendingAction::getId, id).eq(AgentPendingAction::getStatus, expected));
+        if (changed != 1) throw new IllegalStateException("该操作状态已变化，不能重复处理");
+    }
+
+    /** Bounded application-owned facts for the next model turn; never raw tool parameters. */
+    public List<Map<String, Object>> actionContext(String sessionId) {
+        if (!StringUtils.hasText(sessionId)) return List.of();
+        List<AgentPendingAction> actions = actionMapper.selectList(Wrappers.<AgentPendingAction>lambdaQuery()
+                .select(AgentPendingAction::getId, AgentPendingAction::getSessionId,
+                        AgentPendingAction::getToolName, AgentPendingAction::getStatus, AgentPendingAction::getSummary)
+                .eq(AgentPendingAction::getSessionId, sessionId)
+                .in(AgentPendingAction::getStatus, List.of("pending", "executing", "approved", "executed", "rejected", "failed"))
+                .orderByDesc(AgentPendingAction::getId).last("LIMIT 8"));
+        if (actions == null) return List.of();
+        List<Map<String, Object>> context = new ArrayList<>();
+        for (AgentPendingAction action : actions) {
+            if (context.size() >= 8) break;
+            if (action.getId() == null || !sessionId.equals(action.getSessionId())) continue;
+            String status = action.getStatus();
+            if (status == null || !List.of("pending", "executing", "approved", "executed", "rejected", "failed").contains(status)) continue;
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", action.getId());
+            item.put("tool", boundedActionText(action.getToolName(), 64));
+            item.put("status", "approved".equals(status) ? "executed" : status);
+            item.put("summary", safeActionSummary(action.getSummary()));
+            context.add(item);
+        }
+        return context;
+    }
+
+    private static String boundedActionText(String value, int limit) {
+        String text = nullTo(value).replaceAll("[\\p{Cntrl}]+", " ").trim();
+        return text.substring(0, Math.min(text.length(), limit));
+    }
+
+    private static String safeActionSummary(String value) {
+        String text = boundedActionText(value, 1024)
+                .replaceAll("(?i)(https?://)[^\\s/@]+:[^\\s/@]+@", "$1[redacted]@")
+                .replaceAll("(?i)([?&](?:token|api_key|apikey|access_token|key|password|secret)=)[^&\\s]+", "$1[redacted]")
+                .replaceAll("(?i)\\bBearer\\s+[^\\s]+", "Bearer [redacted]")
+                .replaceAll("\\bsk-(?:proj-)?[a-zA-Z0-9_-]{16,}", "[redacted]");
+        return boundedActionText(text, 240);
+    }
+
+    /** 给界面用的简短形状 */
+    public static Map<String, Object> actionBrief(AgentPendingAction a) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", a.getId());
+        m.put("status", a.getStatus());
+        m.put("toolName", a.getToolName());
+        m.put("summary", a.getSummary());
+        boolean appCommand = "run_app_command".equals(a.getToolName());
+        if (appCommand || (a.getToolName() != null && Set.of("edit_note", "update_note", "append_to_note").contains(a.getToolName()))) {
+            try {
+                var args = DISPLAY_JSON.readTree(a.getArgsJson());
+                long noteId = args.path(appCommand ? "_note_id" : "note_id").asLong();
+                if (noteId > 0) m.put("noteId", noteId);
+                var preview = args.get(appCommand ? "_app_preview" : "_edit_preview");
+                if (preview != null) m.put("preview", preview);
+            } catch (Exception ignored) { /* 旧操作或不完整参数仍可取消 */ }
+        }
+        return m;
+    }
+}

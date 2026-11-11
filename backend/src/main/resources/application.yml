@@ -1,0 +1,69 @@
+server:
+  port: 18080
+
+spring:
+  application:
+    name: learn-hub-backend
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 60MB
+  datasource:
+    # 注意：宿主机 3306 已被另一个项目（报销系统）的 reimb-mysql-local 容器占用，
+    # 且其 root 密码与本项目不同 —— 若连 3306 会报
+    # "Access denied for user 'root'@'172.17.0.1'"，后端启动即失败。
+    # 因此 learn-hub-mysql 固定映射到 3307（见 README「数据库」一节）。
+    url: jdbc:mysql://localhost:3307/learn_hub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      # 数据库仅由 Flyway 管理，避免旧 schema.sql/data.sql 每次启动重复执行。
+      mode: never
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    encoding: UTF-8
+    # 已有 LearnHub 库没有历史表时，从 0 接入，V1 的兼容补列仍然必须执行。
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+    validate-migration-naming: true
+    fail-on-missing-locations: true
+    clean-disabled: true
+    out-of-order: false
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+logging:
+  level:
+    org.dyh.learnhub: debug
+
+# ===== AI 智能体配置（DeepSeek V4）=====
+# 注意：模型名/地址/密钥等均可在「设置 → 外观与 AI」里覆盖，数据库优先、yml 只作兜底
+ai:
+  deepseek:
+    base-url: https://api.deepseek.com
+    api-key: ${DEEPSEEK_API_KEY:}
+    model: deepseek-flash
+    temperature: 0.4
+
+# ===== 技能目录（润色 / 整理格式的提示词）=====
+# 留空 = 自动探测：./skills → ../skills → ../../skills
+#   （README 的启动方式是在 backend/ 下 java -jar，因此实际命中的是 ../skills）
+# 只有自动探测不奏效时才需要显式指定，例如 --learnhub.skills-dir=D:/xxx/skills
+# 技能文件每次请求实时读取：改完存盘即生效，不用重启后端。详见 skills/README.md
+learnhub:
+  skills-dir: ${LEARNHUB_SKILLS_DIR:}
+  # Optional isolated code runner; empty keeps workflow-only tools available.
+  code-runner-url: ${LEARNHUB_CODE_RUNNER_URL:}
+  # Optional isolated public-page renderer; only the deployment operator configures this endpoint.
+  scrapling-url: ${LEARNHUB_SCRAPLING_URL:}

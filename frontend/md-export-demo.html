@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>md 导出功能演示</title>
+<style>
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em
+}
+code.hljs {
+  padding: 3px 5px
+}
+/*!
+  Theme: GitHub
+  Description: Light theme as seen on github.com
+  Author: github.com
+  Maintainer: @Hirse
+  Updated: 2021-05-15
+
+  Outdated base version: https://github.com/primer/github-syntax-light
+  Current colors taken from GitHub's CSS
+*/
+.hljs {
+  color: #24292e;
+  background: #ffffff
+}
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  /* prettylights-syntax-keyword */
+  color: #d73a49
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  /* prettylights-syntax-entity */
+  color: #6f42c1
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  /* prettylights-syntax-constant */
+  color: #005cc5
+}
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  /* prettylights-syntax-string */
+  color: #032f62
+}
+.hljs-built_in,
+.hljs-symbol {
+  /* prettylights-syntax-variable */
+  color: #e36209
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  /* prettylights-syntax-comment */
+  color: #6a737d
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  /* prettylights-syntax-entity-tag */
+  color: #22863a
+}
+.hljs-subst {
+  /* prettylights-syntax-storage-modifier-import */
+  color: #24292e
+}
+.hljs-section {
+  /* prettylights-syntax-markup-heading */
+  color: #005cc5;
+  font-weight: bold
+}
+.hljs-bullet {
+  /* prettylights-syntax-markup-list */
+  color: #735c0f
+}
+.hljs-emphasis {
+  /* prettylights-syntax-markup-italic */
+  color: #24292e;
+  font-style: italic
+}
+.hljs-strong {
+  /* prettylights-syntax-markup-bold */
+  color: #24292e;
+  font-weight: bold
+}
+.hljs-addition {
+  /* prettylights-syntax-markup-inserted */
+  color: #22863a;
+  background-color: #f0fff4
+}
+.hljs-deletion {
+  /* prettylights-syntax-markup-deleted */
+  color: #b31d28;
+  background-color: #ffeef0
+}
+.hljs-char.escape_,
+.hljs-link,
+.hljs-params,
+.hljs-property,
+.hljs-punctuation,
+.hljs-tag {
+  /* purposely ignored */
+  
+}
+
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  color: #1f2328;
+  background: #ffffff;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 48px 28px 72px;
+}
+.doc-head { border-bottom: 1px solid #d0d7de; padding-bottom: 20px; margin-bottom: 28px; }
+.doc-head h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.35; }
+.doc-meta { color: #6e7781; font-size: 13px; }
+.markdown-body > *:first-child { margin-top: 0; }
+.markdown-body h1, .markdown-body h2 { border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
+.markdown-body h1 { font-size: 1.75em; }
+.markdown-body h2 { font-size: 1.4em; }
+.markdown-body h3 { font-size: 1.2em; }
+.markdown-body h4 { font-size: 1.05em; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+  margin: 1.4em 0 .6em; font-weight: 600; line-height: 1.35;
+}
+.markdown-body p { margin: .8em 0; }
+.markdown-body a { color: #0969da; text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+.markdown-body img { max-width: 100%; }
+.markdown-body blockquote {
+  margin: 1em 0; padding: .1em 1em; color: #57606a;
+  border-left: 4px solid #d0d7de; background: #f6f8fa;
+}
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 86%;
+  background: rgba(175,184,193,.2);
+  padding: .15em .4em; border-radius: 6px;
+}
+.markdown-body pre {
+  background: #f6f8fa; border: 1px solid #d0d7de;
+  border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+  margin: 1em 0; line-height: 1.6;
+}
+.markdown-body pre code { background: none; padding: 0; font-size: 88%; }
+.hljs { display: block; overflow-x: auto; }
+.markdown-body ul, .markdown-body ol { padding-left: 2em; margin: .6em 0; }
+.markdown-body li { margin: .25em 0; }
+.markdown-body li .task-check { display: inline-block; width: 1.2em; color: #57606a; }
+.markdown-body table {
+  border-collapse: collapse; margin: 1em 0; width: 100%;
+  display: block; overflow-x: auto;
+}
+.markdown-body th, .markdown-body td {
+  border: 1px solid #d0d7de; padding: 6px 13px;
+}
+.markdown-body th { background: #f6f8fa; font-weight: 600; }
+.markdown-body hr { border: 0; border-top: 2px solid #d8dee4; margin: 2em 0; }
+.markdown-body del { color: #6e7781; }
+/* :::名称 … ::: 彩色提示块（只用半透明底色，无左侧色条；与应用内预览保持一致） */
+.markdown-body .md-callout {
+  margin: 1em 0; padding: 10px 14px; border-radius: 8px;
+  background: rgba(144,147,153,.08);
+}
+.markdown-body .md-callout p { margin: .3em 0; }
+.markdown-body .md-callout-success { background: rgba(82,196,26,.08); }
+.markdown-body .md-callout-info, .markdown-body .md-callout-note { background: rgba(64,158,255,.08); }
+.markdown-body .md-callout-warning, .markdown-body .md-callout-attention { background: rgba(230,162,60,.1); }
+.markdown-body .md-callout-danger, .markdown-body .md-callout-error { background: rgba(245,108,108,.08); }
+.markdown-body .md-callout-tip { background: rgba(19,194,194,.08); }
+.doc-foot {
+  margin-top: 48px; padding-top: 16px; border-top: 1px solid #d0d7de;
+  color: #8c959f; font-size: 12px; text-align: center;
+}
+@media (prefers-color-scheme: dark) {
+  body { color: #e6edf3; background: #0d1117; }
+  .doc-head { border-color: #30363d; }
+  .doc-meta { color: #8b949e; }
+  .markdown-body h1, .markdown-body h2 { border-color: #21262d; }
+  .markdown-body a { color: #4493f8; }
+  .markdown-body blockquote { color: #8b949e; border-color: #30363d; background: #161b22; }
+  .markdown-body code { background: rgba(110,118,129,.25); }
+  .markdown-body pre { background: #161b22; border-color: #30363d; }
+  .markdown-body th { background: #161b22; }
+  .markdown-body th, .markdown-body td { border-color: #30363d; }
+  .markdown-body hr { border-color: #21262d; }
+  .markdown-body del { color: #8b949e; }
+  .doc-foot { border-color: #30363d; color: #6e7681; }
+  .markdown-body li .task-check { color: #8b949e; }
+}
+
+@media (prefers-color-scheme: dark) {
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em
+}
+code.hljs {
+  padding: 3px 5px
+}
+/*!
+  Theme: GitHub Dark
+  Description: Dark theme as seen on github.com
+  Author: github.com
+  Maintainer: @Hirse
+  Updated: 2021-05-15
+
+  Outdated base version: https://github.com/primer/github-syntax-dark
+  Current colors taken from GitHub's CSS
+*/
+.hljs {
+  color: #c9d1d9;
+  background: #0d1117
+}
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  /* prettylights-syntax-keyword */
+  color: #ff7b72
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  /* prettylights-syntax-entity */
+  color: #d2a8ff
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  /* prettylights-syntax-constant */
+  color: #79c0ff
+}
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  /* prettylights-syntax-string */
+  color: #a5d6ff
+}
+.hljs-built_in,
+.hljs-symbol {
+  /* prettylights-syntax-variable */
+  color: #ffa657
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  /* prettylights-syntax-comment */
+  color: #8b949e
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  /* prettylights-syntax-entity-tag */
+  color: #7ee787
+}
+.hljs-subst {
+  /* prettylights-syntax-storage-modifier-import */
+  color: #c9d1d9
+}
+.hljs-section {
+  /* prettylights-syntax-markup-heading */
+  color: #1f6feb;
+  font-weight: bold
+}
+.hljs-bullet {
+  /* prettylights-syntax-markup-list */
+  color: #f2cc60
+}
+.hljs-emphasis {
+  /* prettylights-syntax-markup-italic */
+  color: #c9d1d9;
+  font-style: italic
+}
+.hljs-strong {
+  /* prettylights-syntax-markup-bold */
+  color: #c9d1d9;
+  font-weight: bold
+}
+.hljs-addition {
+  /* prettylights-syntax-markup-inserted */
+  color: #aff5b4;
+  background-color: #033a16
+}
+.hljs-deletion {
+  /* prettylights-syntax-markup-deleted */
+  color: #ffdcd7;
+  background-color: #67060c
+}
+.hljs-char.escape_,
+.hljs-link,
+.hljs-params,
+.hljs-property,
+.hljs-punctuation,
+.hljs-tag {
+  /* purposely ignored */
+  
+}
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header class="doc-head">
+    <h1>md 导出功能演示</h1>
+    <div class="doc-meta">后端开发 · #SpringBoot #AI智能体　·　更新于 2026-09-09 12:48</div>
+  </header>
+  <article class="markdown-body">
+<h2>学习目标</h2>
+<ul>
+<li><span class="task-check on">✓</span>搞懂 <code>MyBatis-Plus</code> 的条件构造器</li>
+<li><span class="task-check ">○</span>把智能体的函数调用循环改成可配置轮数</li>
+<li><span class="task-check ">○</span>复盘 Spring 事务传播行为</li>
+</ul>
+<h2>今日代码：DeepSeekClient 高亮示例</h2>
+<pre class="hljs"><code><span class="hljs-keyword">public</span> <span class="hljs-type">String</span> <span class="hljs-title function_">chat</span><span class="hljs-params">(List&lt;Message&gt; history)</span> {
+    <span class="hljs-type">HttpRequest</span> <span class="hljs-variable">req</span> <span class="hljs-operator">=</span> HttpRequest.newBuilder()
+        .header(<span class="hljs-string">&quot;Authorization&quot;</span>, <span class="hljs-string">&quot;Bearer &quot;</span> + apiKey)
+        .POST(BodyPublishers.ofString(body))
+        .build();
+    <span class="hljs-keyword">return</span> client.send(req, BodyHandlers.ofString()).body();
+}
+</code></pre>
+<h2>概念对照</h2>
+<table>
+<thead>
+<tr>
+<th>概念</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>组件 Component</td>
+<td>可复用的 UI 单元：对外接收 Props，对内维护 State</td>
+</tr>
+<tr>
+<td>状态 State</td>
+<td>组件内部会变化的数据，变了就重新渲染</td>
+</tr>
+<tr>
+<td>Props 传参</td>
+<td>父组件传给子组件的数据，子组件只读</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>提示：导出的 HTML 是<strong>单文件自包含</strong>的，发给别人直接双击就能看，<s>不需要装任何东西</s>。</p>
+</blockquote>
+<p>详情见 <a href="http://localhost:5173">learn-hub 项目</a>。</p>
+
+  </article>
+  <footer class="doc-foot">由 learn-hub 笔记工作台导出 · 2026/9/29 10:16:09</footer>
+</div>
+</body>
+</html>
