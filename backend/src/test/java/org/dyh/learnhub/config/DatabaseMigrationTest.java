@@ -182,7 +182,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
                 Integer.class)).isEqualTo(31); // 30 application tables and Flyway history
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6", "7");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(db.queryForObject("SELECT DATA_TYPE FROM information_schema.COLUMNS "
                 + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'chunk_text'", String.class))
                 .isEqualTo("mediumtext");
@@ -199,7 +199,7 @@ class DatabaseMigrationTest {
         db.update("DELETE FROM note");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isZero();
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(7);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(8);
     }
 
     @Test
@@ -213,11 +213,12 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3", "4", "5", "6", "7");
+                .containsExactly("0", "1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(structure(url)).containsExactlyElementsOf(structure(freshUrl));
         assertThat(indexes(url)).containsExactlyElementsOf(indexes(freshUrl));
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
         assertThat(db.queryForObject("SELECT content FROM note WHERE id = 9001", String.class)).isEqualTo("# 用户自己的正文");
+        assertThat(db.queryForObject("SELECT revision FROM note WHERE id = 9001", Long.class)).isZero();
         assertThat(db.queryForObject("SELECT api_key FROM model_profile WHERE id = 'keep-profile'", String.class))
                 .isEqualTo("synthetic-test-key");
         assertThat(db.queryForObject("SELECT setting_value FROM app_setting WHERE setting_key = 'custom.setting'", String.class))
@@ -231,7 +232,7 @@ class DatabaseMigrationTest {
                 Integer.class)).isEqualTo(2);
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(8);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(9);
     }
 
     @Test
@@ -253,7 +254,7 @@ class DatabaseMigrationTest {
 
         migrate(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6", "7");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(db.queryForObject("SELECT purpose FROM model_profile WHERE id = 'old-chat'", String.class))
                 .isEqualTo("chat");
         assertThat(db.queryForObject("SELECT api_key FROM model_profile WHERE id = 'old-chat'", String.class))
@@ -273,7 +274,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT content_hash FROM kb_index_state WHERE id = 'note:92001'", String.class))
                 .isEqualTo("original-content-hash");
         migrate(url);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(7);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(8);
     }
 
     @Test
@@ -314,7 +315,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT folder_id FROM file_info WHERE id=96001", Long.class)).isEqualTo(96002);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3", "4", "5", "6", "7");
+                .containsExactly("0", "1", "2", "3", "4", "5", "6", "7", "8");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
     }
@@ -550,8 +551,12 @@ class DatabaseMigrationTest {
             var mapper = context.getBean(KbChunkMapper.class);
             String prefix = "synthetic-space\u0000false\u0000";
             String suffix = "\u0000split:v4:synthetic";
-            var sources = mapper.passageSources(prefix, suffix);
-            assertThat(sources).hasSize(3).allSatisfy(row -> {
+            var sources = mapper.passageSources(prefix, suffix).stream()
+                    .filter(row -> List.of(94001L, 94002L).contains(row.get("source_id")))
+                    .toList();
+            assertThat(sources).extracting(row -> row.get("source_type"))
+                    .containsExactlyInAnyOrder("note", "quick_ref", "file");
+            assertThat(sources).allSatisfy(row -> {
                 assertThat(row).doesNotContainKey("content");
                 assertThat(row.get("source_id")).isEqualTo(94001L);
                 String content = "file".equals(row.get("source_type")) ? summary + "\n" + body : body;
