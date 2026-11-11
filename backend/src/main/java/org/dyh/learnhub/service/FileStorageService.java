@@ -19,7 +19,11 @@ import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -47,6 +51,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.HexFormat;
 import java.security.MessageDigest;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 /**
@@ -78,6 +84,12 @@ public class FileStorageService {
     private final FolderService folderService;
     private DocumentExtractionStore extractionStore = new DocumentExtractionStore();
     private DocumentMediaProcessor mediaProcessor;
+    private TransactionOperations uploadTransactions = TransactionOperations.withoutTransaction();
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setUploadTransactionManager(PlatformTransactionManager manager) {
+        uploadTransactions = new TransactionTemplate(manager);
+    }
     private final java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.locks.ReentrantLock> extractionLocks = new java.util.concurrent.ConcurrentHashMap<>();
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -198,12 +210,12 @@ public class FileStorageService {
     }
 
     /** 上传文件：保存到磁盘 + 写入元数据 + **立刻抽正文**（抽不到也记录原因） */
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public FileInfo upload(MultipartFile file, Long categoryId) {
         return upload(file, categoryId, null);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public FileInfo upload(MultipartFile file, Long categoryId, Long folderId) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("请选择要上传的文件");
@@ -227,17 +239,16 @@ public class FileStorageService {
      * 抽成字节数组后，网页上传、智能体下载入库、将来任何"内容已经在内存里"的场景共用同一条落盘/抽文/通知链路，
      * 也就不会出现"某条路径忘了抽正文"这种半截实现。
      */
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public FileInfo uploadBytes(String originName, byte[] bytes, Long categoryId) {
         return uploadBytes(originName, bytes, categoryId, null);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public FileInfo uploadBytes(String originName, byte[] bytes, Long categoryId, Long folderId) {
         if (bytes == null || bytes.length == 0) {
             throw new IllegalArgumentException("文件内容为空");
         }
-        Long targetFolder = folderService.requireTarget("file", folderId);
         // cleanPath 只管路径分隔符；normalizeOriginName 再去控制字符并截到列上限。
         // 这里是**所有导入路径的唯一汇聚点**（网页上传 / 智能体存论文 / MCP / 生成 Word），
         // 所以放在这一处就够了，不必在每个调用方各写一遍。
@@ -259,15 +270,40 @@ public class FileStorageService {
         info.setSize((long) bytes.length);
         info.setExt(ext);
         info.setCategoryId(categoryId);
-        info.setFolderId(targetFolder);
         info.setTextStatus("pending");
-        fileInfoMapper.insert(info);
-        learningActivity.record("file", info.getId());
-        // 抽取放在入库之后：即使抽取失败/超时，资料本身也已经存在（可重试），不会出现"文件丢了但记录在"
-        extractInto(info, target);
-        publishChanged(categoryId);
-        log.info("文件入库成功: {} ({} bytes) -> {}，正文 {}", name, bytes.length, storeName, info.getTextStatus());
-        return info;
+        AtomicReference<ReentrantLock> held = new AtomicReference<>();
+        try {
+            try {
+                uploadTransactions.executeWithoutResult(tx -> {
+                    info.setFolderId(folderService.requireTarget("file", folderId));
+                    fileInfoMapper.insert(info);
+                    // Claim the same per-file lock as re-extraction before the pending row becomes visible.
+                    var lock = extractionLocks.computeIfAbsent(info.getId(), unused -> new ReentrantLock());
+                    lock.lock();
+                    held.set(lock);
+                    learningActivity.record("file", info.getId());
+                });
+            } catch (IllegalArgumentException invalid) {
+                if (info.getId() == null) {
+                    try { Files.deleteIfExists(target); }
+                    catch (IOException cleanup) { invalid.addSuppressed(cleanup); }
+                }
+                throw invalid;
+            }
+            ExtractedDocument extracted;
+            try {
+                extracted = extractDocument(info, target, true);
+            } catch (RuntimeException failed) {
+                log.warn("上传后抽取正文失败，资料 #{} 原文件已保留", info.getId(), failed);
+                extracted = new ExtractedDocument(null, new DocumentTextService.Extracted(
+                        DocumentTextService.STATUS_FAILED, null, "正文抽取失败，原文件已保留；可以重新抽取", 0));
+            }
+            persistExtraction(info, target, extracted.detailed(), extracted.text(), true);
+            log.info("文件入库成功: {} ({} bytes) -> {}，正文 {}", name, bytes.length, storeName, info.getTextStatus());
+            return info;
+        } finally {
+            if (held.get() != null) held.get().unlock();
+        }
     }
 
     /** 内容变更通知：增量索引 / wiki 自动更新靠它（发的是**分类 id**，因为它们决定图谱归属） */
@@ -296,8 +332,17 @@ public class FileStorageService {
             if (!Files.exists(path)) {
                 continue;
             }
-            extractInto(info, path, false);
-            done++;
+            var lock = extractionLocks.computeIfAbsent(info.getId(), unused -> new ReentrantLock());
+            if (!lock.tryLock()) continue;
+            try {
+                // A concurrent upload/re-extraction may have finished since the pending query.
+                FileInfo current = fileInfoMapper.selectById(info.getId());
+                if (current == null || "ok".equals(current.getTextStatus())) continue;
+                extractInto(current, path, true);
+                done++;
+            } finally {
+                lock.unlock();
+            }
         }
         log.info("启动补抽正文：{} 条", done);
         if (done > 0) {
@@ -311,15 +356,14 @@ public class FileStorageService {
      * <p>无论成功失败都写回状态：{@code ok / empty / unsupported / skipped / failed} + 原因。
      * 这样界面上能解释"为什么正文是空的"，而不是留一片空白让用户以为坏了。
      */
-    private String extractInto(FileInfo info, Path path) {
-        return extractInto(info, path, true);
+    private String extractInto(FileInfo info, Path path, boolean processMedia) {
+        var extracted = extractDocument(info, path, processMedia);
+        return persistExtraction(info, path, extracted.detailed(), extracted.text(), false);
     }
 
-    private String extractInto(FileInfo info, Path path, boolean trainEligible) {
-        return extractInto(info, path, trainEligible, true);
-    }
+    private record ExtractedDocument(DocumentIngestionService.Extraction detailed, DocumentTextService.Extracted text) {}
 
-    private String extractInto(FileInfo info, Path path, boolean trainEligible, boolean processMedia) {
+    private ExtractedDocument extractDocument(FileInfo info, Path path, boolean processMedia) {
         DocumentIngestionService.Extraction detailed = documentTextService.extractDetailed(path, info.getExt(), info.getSize());
         if (detailed != null) detailed = withConfirmedFormulaCache(info, detailed);
         if (detailed != null && mediaProcessor != null)
@@ -329,7 +373,7 @@ public class FileStorageService {
         // Preserve compatibility with lightweight callers/mocks that only implement the old text extractor.
         DocumentTextService.Extracted r = detailed == null ? documentTextService.extract(path, info.getExt(), info.getSize())
                 : new DocumentTextService.Extracted(detailed.status(), detailed.text(), detailed.error(), detailed.chars());
-        return persistExtraction(info, path, detailed, r, trainEligible);
+        return new ExtractedDocument(detailed, r);
     }
 
     /** Cache-only layout migration also retains previously accepted local OCR tied to identical image bytes. */
@@ -363,7 +407,7 @@ public class FileStorageService {
     }
 
     private String persistExtraction(FileInfo info, Path path, DocumentIngestionService.Extraction detailed,
-                                     DocumentTextService.Extracted r, boolean trainEligible) {
+                                     DocumentTextService.Extracted r, boolean uploaded) {
         boolean hadReliableVersion = "ok".equals(info.getTextStatus()) && StringUtils.hasText(info.getTextContent());
         if (hadReliableVersion && detailed != null && "ok".equals(r.status()) && losesReliableEvidence(info,detailed)) {
             FileInfo failure=new FileInfo(); failure.setId(info.getId());
@@ -394,9 +438,22 @@ public class FileStorageService {
         FileInfo patch = new FileInfo(); patch.setId(info.getId()); patch.setTextStatus(info.getTextStatus());
         patch.setTextContent(info.getTextContent()); patch.setTextChars(info.getTextChars());
         patch.setTextError(info.getTextError()); patch.setExtractedAt(info.getExtractedAt());
-        fileInfoMapper.updateById(patch);
-        if (trainEligible && "ok".equals(r.status()) && StringUtils.hasText(r.text())) {
-            events.publishEvent(new FileTextExtractedEvent(info.getId(), info.getOriginName(), r.text()));
+        if (uploaded) {
+            uploadTransactions.executeWithoutResult(tx -> {
+                if (fileInfoMapper.updateById(patch) != 1)
+                    throw new IllegalArgumentException("资料已删除，未保存抽取结果");
+                // The row is locked by the UPDATE, so events use the current metadata even
+                // if it was edited while OCR ran. Keep the outbox insert in this transaction.
+                var current = fileInfoMapper.selectOne(Wrappers.<FileInfo>lambdaQuery()
+                        .select(FileInfo::getCategoryId, FileInfo::getOriginName)
+                        .eq(FileInfo::getId, info.getId()));
+                if ("ok".equals(patch.getTextStatus()) && StringUtils.hasText(patch.getTextContent())) {
+                    events.publishEvent(new FileTextExtractedEvent(info.getId(), current.getOriginName(), patch.getTextContent()));
+                }
+                publishChanged(current.getCategoryId());
+            });
+        } else {
+            fileInfoMapper.updateById(patch);
         }
         return r.status();
     }
@@ -489,7 +546,7 @@ public class FileStorageService {
         if (!Files.exists(path)) {
             throw new IllegalStateException("文件已丢失: " + info.getStoreName());
         }
-        if ("preserved".equals(extractInto(info, path, false, processMedia)))
+        if ("preserved".equals(extractInto(info, path, processMedia)))
             throw new IllegalStateException("本次抽取未通过或无法保存，已保留上次可用正文和定位");
         publishChanged(info.getCategoryId());
         return detailMap(id);
