@@ -84,6 +84,20 @@ class AgentNoteEditTest {
         verify(notes).editContent(eq(12L), argThat(r -> r.expectedHash().equals("old-version") && r.operations().size() == 1));
     }
 
+    @Test void failedFinalStatusWriteDoesNotReplayTheNoteEditOrAppendSuccess() {
+        var action = new AgentPendingAction();
+        action.setId(8L); action.setSessionId("s1"); action.setStatus("executing"); action.setToolName("edit_note");
+        action.setArgsJson(ARGS); action.setSummary("删除旧字");
+        when(sessions.claimAction(8L)).thenReturn(action);
+        when(notes.editContent(eq(12L), any())).thenReturn(preview(true));
+        doThrow(new IllegalStateException("synthetic outage")).when(sessions).resolveAction(8L, "approved");
+
+        assertThrows(IllegalStateException.class, () -> agent.executePendingAction(8L));
+        verify(notes).editContent(eq(12L), any());
+        verify(sessions).recordInterruptedAction(8L);
+        verify(sessions, never()).append(any(), any(), any(), any(), any());
+    }
+
     @Test void toolIsRegisteredWithStructuredOperations() {
         List<?> defs = ReflectionTestUtils.invokeMethod(agent, "toolDefinitions");
         JsonNode schema = defs.stream().map(n -> json.<JsonNode>valueToTree(n)).map(n -> n.path("function"))

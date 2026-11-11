@@ -714,3 +714,22 @@ test('a history read started during approval cannot replace its owning reply bef
     } finally { h.dispose() }
   }
 })
+
+test('an interrupted approval shows an unknown outcome and does not repeat the write', async () => {
+  const running = { ...action, status: 'executing' }
+  const h = harness({
+    saved: 'a',
+    session: () => ({ messages: [{ role: 'assistant', content: '合成任务处理中' }], pendingActions: [running] }),
+    actionState: () => ({ id: 91, status: 'interrupted' }),
+  })
+  try {
+    await flush()
+    await h.state.checkActionState(h.state.pending[0])
+    assert.deepEqual(h.checks, [91])
+    assert.deepEqual(h.approvals, [])
+    assert.deepEqual(h.rejections, [])
+    assert.equal(h.state.pending.length, 0)
+    assert.match(h.state.messages[0].content, /结果未知/)
+    assert.doesNotMatch(h.state.messages[0].content, /已确认执行|执行失败/)
+  } finally { h.dispose() }
+})

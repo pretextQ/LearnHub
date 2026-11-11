@@ -3,6 +3,7 @@ package org.dyh.learnhub.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.dyh.learnhub.entity.AgentEvent;
@@ -155,19 +156,20 @@ class AgentSessionProgressTest {
         String payload = json.writeValueAsString(Map.of("progress", List.of(waiting("parent", 101L), waiting("child", 101L),
                 Map.of("id", "pending", "kind", "tool", "status", "running", "title", "合成操作", "actionId", 102L),
                 Map.of("id", "finished", "kind", "tool", "status", "running", "title", "合成操作", "actionId", 103L),
-                waiting("other-session", 104L), waiting("unknown-state", 105L))));
+                waiting("other-session", 104L), waiting("unknown-state", 105L), waiting("interrupted", 106L))));
         AgentEvent saved = event("progress", payload);
         when(events.selectList(any())).thenReturn(List.of(event("user", "合成问题"), event("assistant", "合成回答"), saved));
         AgentPendingAction other = action(104L, "executing"); other.setSessionId("different-synthetic-session");
         when(actions.selectBatchIds(any())).thenReturn(List.of(action(101L, "executing"), action(102L, "pending"),
-                action(103L, "approved"), other, action(105L, "unknown")));
+                action(103L, "approved"), other, action(105L, "unknown"), action(106L, "interrupted")));
 
         var steps = rows(sessions.messagesForDisplay("synthetic-session").get(1));
-        assertEquals(List.of("running", "running", "waiting", "completed", "waiting", "waiting"),
+        assertEquals(List.of("running", "running", "waiting", "completed", "waiting", "waiting", "error"),
                 steps.stream().map(row -> row.get("status")).toList());
         assertEquals("正在执行，请勿重复确认", steps.get(0).get("detail"));
         assertEquals("等待确认执行", steps.get(2).get("detail"));
         assertEquals("已确认执行", steps.get(3).get("detail"));
+        assertEquals(AgentSessionService.ACTION_RESULT_UNKNOWN, steps.get(6).get("detail"));
         assertEquals(payload, saved.getContent());
         verify(actions).selectBatchIds(any());
         verifyNoMoreInteractions(actions);
@@ -198,6 +200,40 @@ class AgentSessionProgressTest {
         assertFalse(query.getValue().getParamNameValuePairs().containsValue("approved"));
         verifyNoMoreInteractions(actions);
         verifyNoInteractions(events);
+    }
+
+    @Test @SuppressWarnings("unchecked") void startupInterruptsOnlyExecutingRows() {
+        sessions.recoverActionsFromPreviousRun();
+        var patch = ArgumentCaptor.forClass(AgentPendingAction.class);
+        ArgumentCaptor<LambdaUpdateWrapper<AgentPendingAction>> condition = ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+        verify(actions).update(patch.capture(), condition.capture());
+        assertEquals("interrupted", patch.getValue().getStatus());
+        assertNotNull(patch.getValue().getResolvedAt());
+        assertEquals("(status = #{ew.paramNameValuePairs.MPGENVAL1})", condition.getValue().getSqlSegment());
+        assertEquals(List.of("executing"), List.copyOf(condition.getValue().getParamNameValuePairs().values()));
+        verifyNoMoreInteractions(actions);
+        verifyNoInteractions(events);
+    }
+
+    @Test @SuppressWarnings("unchecked") void statusReadRetriesOnlyTheFailedFinalizationWithoutReclaiming() {
+        when(actions.update(any(AgentPendingAction.class), any())).thenThrow(new IllegalStateException("synthetic outage")).thenReturn(1);
+        when(actions.selectById(101L)).thenReturn(action(101L, "interrupted"));
+
+        sessions.recordInterruptedAction(101L);
+        assertEquals("interrupted", sessions.getAction(101L).getStatus());
+        assertEquals("interrupted", sessions.getAction(101L).getStatus());
+
+        var patch = ArgumentCaptor.forClass(AgentPendingAction.class);
+        ArgumentCaptor<LambdaUpdateWrapper<AgentPendingAction>> condition = ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+        verify(actions, times(2)).update(patch.capture(), condition.capture());
+        for (var wrapper : condition.getAllValues()) {
+            assertTrue(wrapper.getSqlSegment().contains("status ="));
+            assertTrue(wrapper.getSqlSegment().contains("id IN"));
+            assertTrue(wrapper.getParamNameValuePairs().values().containsAll(List.of("executing", 101L)));
+        }
+        assertTrue(patch.getAllValues().stream().allMatch(row -> "interrupted".equals(row.getStatus())));
+        verify(actions, times(2)).selectById(101L);
+        verifyNoMoreInteractions(actions);
     }
 
     private Map<String, Object> waiting(String id, long actionId) {

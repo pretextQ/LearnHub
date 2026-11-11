@@ -335,7 +335,7 @@ function actionLocked(a) {
   return resolvingActions.value.has(a.id) || checkingActions.value.has(a.id) || uncertainActions.value.has(a.id) || a.status === 'executing'
 }
 
-function showActionOutcome(a, approve, succeeded, hint, context) {
+function showActionOutcome(a, approve, succeeded, hint, context, interrupted = false) {
   if (!context.isCurrent()) return
   sessionLoadVersion++
   const last = context.message
@@ -348,7 +348,7 @@ function showActionOutcome(a, approve, succeeded, hint, context) {
       id: `approval-${a.id}`, kind: 'update', status: approve && !succeeded ? 'error' : 'completed',
       title: hint, toolName: a.toolName,
     })
-    const tail = approve
+    const tail = interrupted ? '\n\n（' + hint + '）' : approve
       ? `\n\n（${succeeded ? '已确认执行' : '执行失败'}：${hint}）`
       : `\n\n（已取消，未做任何改动：${a.summary || ''}）`
     last.content = (last.content || '') + tail
@@ -367,6 +367,12 @@ async function checkActionState(a, context = actionContext(a)) {
     const state = await aiApi.actionState(a.id)
     if (!context.isCurrent()) return
     const status = state?.status
+    if (status === 'interrupted') {
+      const hint = state.detail || '操作执行中断，结果未知。请先核对实际结果，勿重复执行。'
+      ElMessage.warning(hint)
+      showActionOutcome(a, true, false, hint, context, true)
+      return
+    }
     if (['approved', 'executed', 'failed', 'rejected'].includes(status)) {
       const approved = status === 'approved' || status === 'executed'
       const rejected = status === 'rejected'

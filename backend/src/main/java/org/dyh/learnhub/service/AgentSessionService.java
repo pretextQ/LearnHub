@@ -1,6 +1,7 @@
 package org.dyh.learnhub.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dyh.learnhub.ai.AgentProgressDetails;
@@ -10,6 +11,7 @@ import org.dyh.learnhub.entity.AgentSession;
 import org.dyh.learnhub.mapper.AgentEventMapper;
 import org.dyh.learnhub.mapper.AgentPendingActionMapper;
 import org.dyh.learnhub.mapper.AgentSessionMapper;
+import org.springframework.boot.sql.init.dependency.DependsOnDatabaseInitialization;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -20,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 智能体会话：事件日志的读写与「投影」。
@@ -40,6 +43,7 @@ import java.util.UUID;
  */
 @Slf4j
 @Service
+@DependsOnDatabaseInitialization
 @RequiredArgsConstructor
 public class AgentSessionService {
 
@@ -47,6 +51,47 @@ public class AgentSessionService {
     private final AgentEventMapper eventMapper;
     private final AgentPendingActionMapper actionMapper;
     private final LearningActivityService learningActivity;
+
+    public static final String ACTION_INTERRUPTED = "interrupted";
+    public static final String ACTION_RESULT_UNKNOWN = "操作执行中断，结果未知。请先核对实际结果，勿重复执行。";
+    private final Set<Long> interruptedWrites = ConcurrentHashMap.newKeySet();
+
+    /** Startup runs before this instance can accept approvals. Never replay an orphaned write. */
+    @PostConstruct
+    void recoverActionsFromPreviousRun() {
+        int recovered = interruptExecuting(null);
+        if (recovered > 0) log.warn("已将 {} 项中断的审批标记为结果未知", recovered);
+    }
+
+    /** Called only by the owner of a claimed action after its final status could not be recorded. */
+    public void recordInterruptedAction(Long id) {
+        interruptedWrites.add(id);
+        retryInterruptedWrites();
+    }
+
+    private void retryInterruptedWrites() {
+        if (interruptedWrites.isEmpty()) return;
+        var ids = interruptedWrites.stream().limit(128).toList();
+        if (ids.isEmpty()) return;
+        try {
+            interruptExecuting(ids);
+            interruptedWrites.removeAll(ids);
+        } catch (RuntimeException unavailable) {
+            // A temporarily unavailable database must not mask the original failure.
+            // The next approval read, or startup after a restart, retries only this state update.
+            log.debug("暂未能记录审批中断状态", unavailable);
+        }
+    }
+
+    private int interruptExecuting(List<Long> ids) {
+        AgentPendingAction patch = new AgentPendingAction();
+        patch.setStatus(ACTION_INTERRUPTED);
+        patch.setResolvedAt(LocalDateTime.now());
+        var condition = Wrappers.<AgentPendingAction>lambdaUpdate()
+                .eq(AgentPendingAction::getStatus, "executing");
+        if (ids != null) condition.in(AgentPendingAction::getId, ids);
+        return actionMapper.update(patch, condition);
+    }
 
     /** 投影给模型的最近轮数（一轮 = 一问一答），再早的靠摘要兜 */
     public static final int PROJECTION_ROUNDS = 8;
@@ -453,6 +498,7 @@ public class AgentSessionService {
             }
         }
         if (waiting.isEmpty()) return;
+        retryInterruptedWrites();
         List<AgentPendingAction> actions = actionMapper.selectBatchIds(waiting.keySet());
         if (actions == null) return;
         for (AgentPendingAction action : actions) {
@@ -462,7 +508,7 @@ public class AgentSessionService {
                 case "pending" -> "waiting";
                 case "executing" -> "running";
                 case "approved", "rejected" -> "completed";
-                case "failed" -> "error";
+                case "failed", ACTION_INTERRUPTED -> "error";
                 default -> null;
             };
             if (progressStatus == null) continue;
@@ -471,6 +517,7 @@ public class AgentSessionService {
                 case "executing" -> "正在执行，请勿重复确认";
                 case "approved" -> "已确认执行";
                 case "rejected" -> "已取消，本项未执行";
+                case ACTION_INTERRUPTED -> ACTION_RESULT_UNKNOWN;
                 default -> "执行失败，请根据会话中的说明重试";
             };
             for (Map<String, Object> row : waiting.get(action.getId())) {
@@ -564,6 +611,7 @@ public class AgentSessionService {
 
     /** Unfinished actions, including an approval still executing after a disconnected response. */
     public List<AgentPendingAction> pendingActions(String sessionId) {
+        retryInterruptedWrites();
         return actionMapper.selectList(Wrappers.<AgentPendingAction>lambdaQuery()
                 .eq(AgentPendingAction::getSessionId, sessionId)
                 .in(AgentPendingAction::getStatus, List.of("pending", "executing"))
@@ -571,6 +619,7 @@ public class AgentSessionService {
     }
 
     public AgentPendingAction getAction(Long id) {
+        retryInterruptedWrites();
         return actionMapper.selectById(id);
     }
 
@@ -606,11 +655,12 @@ public class AgentSessionService {
     /** Bounded application-owned facts for the next model turn; never raw tool parameters. */
     public List<Map<String, Object>> actionContext(String sessionId) {
         if (!StringUtils.hasText(sessionId)) return List.of();
+        retryInterruptedWrites();
         List<AgentPendingAction> actions = actionMapper.selectList(Wrappers.<AgentPendingAction>lambdaQuery()
                 .select(AgentPendingAction::getId, AgentPendingAction::getSessionId,
                         AgentPendingAction::getToolName, AgentPendingAction::getStatus, AgentPendingAction::getSummary)
                 .eq(AgentPendingAction::getSessionId, sessionId)
-                .in(AgentPendingAction::getStatus, List.of("pending", "executing", "approved", "executed", "rejected", "failed"))
+                .in(AgentPendingAction::getStatus, List.of("pending", "executing", "approved", "executed", "rejected", "failed", ACTION_INTERRUPTED))
                 .orderByDesc(AgentPendingAction::getId).last("LIMIT 8"));
         if (actions == null) return List.of();
         List<Map<String, Object>> context = new ArrayList<>();
@@ -618,7 +668,7 @@ public class AgentSessionService {
             if (context.size() >= 8) break;
             if (action.getId() == null || !sessionId.equals(action.getSessionId())) continue;
             String status = action.getStatus();
-            if (status == null || !List.of("pending", "executing", "approved", "executed", "rejected", "failed").contains(status)) continue;
+            if (status == null || !List.of("pending", "executing", "approved", "executed", "rejected", "failed", ACTION_INTERRUPTED).contains(status)) continue;
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id", action.getId());
             item.put("tool", boundedActionText(action.getToolName(), 64));
