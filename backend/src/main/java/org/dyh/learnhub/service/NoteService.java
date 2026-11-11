@@ -4,6 +4,10 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import org.commonmark.node.Heading;
+import org.commonmark.node.Paragraph;
+import org.commonmark.parser.IncludeSourceSpans;
+import org.commonmark.parser.Parser;
 import org.dyh.learnhub.common.KnowledgeChangedEvent;
 import org.dyh.learnhub.common.PageResult;
 import org.dyh.learnhub.dto.NoteDTO;
@@ -27,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -230,114 +235,80 @@ public class NoteService {
         return detail(id);
     }
 
-    /**
-     * 剥掉正文开头那行「与标题重复」的一级标题。
-     * <p>
-     * 约定（见 skills/markdown-beautify/SKILL.md）：标题只存 {@code title} 字段，正文用
-     * {@code ##} / {@code ###} 组织层级。但历史数据与模型输出经常两处都写，于是打开笔记
-     * 就看到两个标题、导出 .md 时还会在前面再拼一次。这里在保存与更新的唯一入口统一剥掉。
-     * <p>
-     * 只在"确实是同一个标题"时剥：忽略空白与常见标点后两边相等，或一边包含另一边
-     *（模型爱把标题简写，例如标题「Spring Boot 启动流程（高频面试题）」对应 H1「Spring Boot 启动流程」）。
-     */
+    private static final Parser NOTE_MARKDOWN = Parser.builder()
+            .includeSourceSpans(IncludeSourceSpans.BLOCKS).build();
+    private static final Pattern ATX_HEADING = Pattern.compile("^ {0,3}(#{1,6})[ \t]+(.+)$");
+    private static final Pattern CLOSING_HASHES = Pattern.compile("[ \t]+#+[ \t]*$");
+
+    private static final Pattern LINE_END = Pattern.compile("\r\n|\r|\n");
+    private static final Pattern AFTER_LINE_END = Pattern.compile("(?<=\n)|(?<=\r)(?!\n)");
+    private static final Pattern LEADING_BLANK_LINES = Pattern.compile("^(?:[ \t]*(?:\r\n|\r|\n))+");
+
+    private record HeadingLine(int level, String text) {}
+
+    private static HeadingLine headingLine(String line) {
+        var match = ATX_HEADING.matcher(line.stripTrailing());
+        if (!match.matches()) return null;
+        String text = CLOSING_HASHES.matcher(match.group(2)).replaceFirst("").strip();
+        return text.isEmpty() || text.matches("#+") ? null : new HeadingLine(match.group(1).length(), text);
+    }
+
+    /** 剥掉与笔记标题完全相同的首行 H1；标点和行内格式可能承载不同含义。 */
     static String stripDuplicatedTitle(String content, String title) {
-        if (content == null || content.isEmpty()) {
-            return content;
-        }
-        String t = title == null ? "" : title.trim();
-        if (t.isEmpty()) {
-            return content;
-        }
-        int lineEnd = content.indexOf('\n');
-        String firstLine = (lineEnd < 0 ? content : content.substring(0, lineEnd)).trim();
-        if (!firstLine.startsWith("# ")) {
-            return content;   // 只处理一级标题行（`## ` 不满足这个前缀）
-        }
-        String heading = firstLine.substring(2).trim();
-        if (!sameTitleText(heading, t)) {
-            return content;
-        }
-        String rest = lineEnd < 0 ? "" : content.substring(lineEnd + 1);
-        // 连标题下面的空行一起去掉，别让正文一开头留一堆空行
-        return rest.replaceFirst("^(\\s*\\r?\\n)+", "");
+        if (content == null || content.isEmpty() || title == null) return content;
+        var lineEnd = LINE_END.matcher(content);
+        boolean multiline = lineEnd.find();
+        var heading = headingLine(multiline ? content.substring(0, lineEnd.start()) : content);
+        if (heading == null || heading.level() != 1 || !heading.text().equals(title.strip())) return content;
+        return multiline ? LEADING_BLANK_LINES.matcher(content.substring(lineEnd.end())).replaceFirst("") : "";
     }
 
-    /** 两个标题是否"同一个"：归一化后相等或互相包含 */
-    private static boolean sameTitleText(String a, String b) {
-        String x = normalizeTitle(a);
-        String y = normalizeTitle(b);
-        if (x.isEmpty() || y.isEmpty()) {
-            return false;
-        }
-        return x.equals(y) || x.contains(y) || y.contains(x);
-    }
-
-    private static String normalizeTitle(String s) {
-        return s == null ? "" : s.replaceAll("[\\s`*：:、，,。.（）()【】\\[\\]\\-]", "");
-    }
-    /**
-     * 保存 / 更新前的正文规范化，只做两件与「生成笔记」直接相关的事，其余一字不动：
-     * <ol>
-     *   <li>剥掉开头那行与本笔记标题重复的一级标题（标题只存 title 字段）；</li>
-     *   <li>合并「相邻（中间只有空行）且互相包含」的重复小节标题 —— 生成链路（模型整篇写、
-     *       长文分节拼装）经常把同一个小节标题写两遍，正文与右侧大纲于是都出现两条。</li>
-     * </ol>
-     * 之前只在长文分节那一条路径里去了重复，模型整篇写或用户粘贴进来的照样会带进来，
-     * 所以放到保存的唯一入口统一处理。
-     */
     static String normalizeNoteContent(String content, String title) {
-        return collapseAdjacentDuplicateHeadings(stripDuplicatedTitle(content, title));
+        return stripDuplicatedTitle(collapseAdjacentDuplicateHeadings(content), title);
     }
 
-    private static final java.util.regex.Pattern HEADING_LINE =
-            java.util.regex.Pattern.compile("^(#{1,6})\\s+(.*)$");
-    private static final java.util.regex.Pattern FENCE_LINE =
-            java.util.regex.Pattern.compile("^\\s*(```|~~~)");
-
-    /** 相邻且互相包含的同级标题只留更具体的那个（代码块里的 # 注释不动） */
+    /** 只移除相邻且文字相同的同级标题，不重新渲染 Markdown。 */
     static String collapseAdjacentDuplicateHeadings(String content) {
-        if (content == null || content.isEmpty()) {
-            return content;
+        if (content == null || !content.contains("#") || !LINE_END.matcher(content).find()) return content;
+        String[] lines = AFTER_LINE_END.split(content, -1);
+        HeadingLine[] headings = new HeadingLine[lines.length];
+        boolean[] mathCandidate = new boolean[lines.length];
+        // 只看顶层块。围栏、缩进代码、引用和 HTML 中看起来像标题的文本不是标题。
+        for (var node = NOTE_MARKDOWN.parse(content).getFirstChild(); node != null; node = node.getNext()) {
+            var spans = node.getSourceSpans();
+            if (spans.isEmpty()) continue;
+            if (node instanceof Heading && spans.size() == 1) {
+                int line = spans.getFirst().getLineIndex();
+                headings[line] = headingLine(lines[line]);
+            }
+            if (node instanceof Paragraph || node instanceof Heading) {
+                for (var span : spans) mathCandidate[span.getLineIndex()] = true;
+            }
         }
-        String[] lines = content.split("\n", -1);
-        List<String> out = new ArrayList<>(lines.length);
-        boolean inFence = false;
-        int i = 0;
-        while (i < lines.length) {
+
+        StringBuilder out = new StringBuilder(content.length());
+        HeadingLine previous = null;
+        String mathEnd = null;
+        for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
-            if (FENCE_LINE.matcher(line).find()) {
-                inFence = !inFence;
-                out.add(line);
-                i++;
+            String trimmed = line.stripLeading();
+            if (mathEnd != null) {
+                if (line.contains(mathEnd)) mathEnd = null;
+                out.append(line);
                 continue;
             }
-            if (!inFence) {
-                java.util.regex.Matcher m1 = HEADING_LINE.matcher(line.trim());
-                if (m1.matches()) {
-                    String level = m1.group(1);
-                    String text = m1.group(2).trim();
-                    int j = i + 1;
-                    while (j < lines.length && lines[j].trim().isEmpty()) {
-                        j++;
-                    }
-                    if (j < lines.length) {
-                        java.util.regex.Matcher m2 = HEADING_LINE.matcher(lines[j].trim());
-                        if (m2.matches() && m2.group(1).equals(level)) {
-                            String text2 = m2.group(2).trim();
-                            if (sameTitleText(text, text2)) {
-                                // 保留更具体（更长）的那一行，且原样写回它，避免动到换行风格
-                                out.add(text2.length() > text.length() ? lines[j] : line);
-                                i = j + 1;
-                                continue;
-                            }
-                        }
-                    }
-                }
+            // CommonMark 本身不识别站内的 LaTeX 块；其中的内容一律原样保留。
+            if (mathCandidate[i] && (trimmed.startsWith("$$") || trimmed.startsWith("\\["))) {
+                String closer = trimmed.startsWith("$$") ? "$$" : "\\]";
+                if (trimmed.indexOf(closer, 2) < 0) mathEnd = closer;
+                previous = null;
+            } else if (!line.isBlank()) {
+                if (headings[i] != null && headings[i].equals(previous)) continue;
+                previous = headings[i];
             }
-            out.add(line);
-            i++;
+            out.append(line);
         }
-        return String.join("\n", out);
+        return out.toString();
     }
 
     /** 内容变更通知：wiki 的自动增量更新靠它（见 WikiService#onKnowledgeChanged） */
