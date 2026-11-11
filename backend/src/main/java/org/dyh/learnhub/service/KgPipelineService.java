@@ -15,7 +15,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -57,7 +56,7 @@ public class KgPipelineService {
         t.setDaemon(true);
         return t;
     });
-    private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    private final JobHistory<Job> jobs = new JobHistory<>();
 
     public KgPipelineService(KbChunkMapper kbChunkMapper, WikiPageMapper wikiMapper,
                              KgGraphService graph, TripleExtractor extractor,
@@ -91,29 +90,29 @@ public class KgPipelineService {
     }
 
     public synchronized Map<String, Object> start() {
-        for (Job existing : jobs.values()) {
+        for (Job existing : jobs.activeJobs()) {
             if ("running".equals(existing.status)) return view(existing.id);
         }
         Job job = new Job(UUID.randomUUID().toString().substring(0, 8));
-        jobs.put(job.id, job);
-        try {
-            runner.submit(() -> build(job));
-        } catch (java.util.concurrent.RejectedExecutionException rejected) {
-            jobs.remove(job.id, job);
-            throw rejected;
-        }
+        jobs.submit(job.id, job, runner, () -> build(job), () -> {
+            if ("running".equals(job.status)) fail(job, "构建意外中断");
+        });
         return view(job.id);
     }
 
     public boolean hasRunningJobs() {
-        return jobs.values().stream().anyMatch(job -> "running".equals(job.status));
+        return jobs.activeJobs().stream().anyMatch(job -> "running".equals(job.status));
     }
 
     public Map<String, Object> view(String id) {
+        Map<String, Object> result = viewOrNull(id);
+        if (result == null) throw new IllegalArgumentException("任务不存在或已过期：" + id);
+        return result;
+    }
+
+    public Map<String, Object> viewOrNull(String id) {
         Job j = jobs.get(id);
-        if (j == null) {
-            throw new IllegalArgumentException("任务不存在或已过期：" + id);
-        }
+        if (j == null) return null;
         Map<String, Object> o = new LinkedHashMap<>();
         o.put("jobId", j.id);
         o.put("topicKey", "kg");
@@ -133,10 +132,6 @@ public class KgPipelineService {
         o.put("elapsedMs",
                 (j.finishedAt == 0 ? System.currentTimeMillis() : j.finishedAt) - j.startedAt);
         return o;
-    }
-
-    public Map<String, Object> viewOrNull(String id) {
-        return jobs.containsKey(id) ? view(id) : null;
     }
 
     // ------------------------------------------------------------------
@@ -255,8 +250,6 @@ public class KgPipelineService {
         } catch (Exception e) {
             log.warn("概念图谱构建失败：{}", e.toString());
             fail(job, e.getMessage() == null ? e.toString() : e.getMessage());
-        } finally {
-            if ("running".equals(job.status)) fail(job, "构建意外中断");
         }
     }
 

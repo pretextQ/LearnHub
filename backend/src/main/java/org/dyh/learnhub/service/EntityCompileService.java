@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -85,7 +84,15 @@ public class EntityCompileService {
         t.setDaemon(true);
         return t;
     });
-    private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    private final JobHistory<Job> jobs = new JobHistory<>();
+
+    private static void markAborted(Job job) {
+        if (!"running".equals(job.status)) return;
+        job.error = "任务意外中断";
+        job.stage = "失败";
+        job.finishedAt = System.currentTimeMillis();
+        job.status = "failed";
+    }
 
     @jakarta.annotation.PreDestroy
     public void shutdown() {
@@ -106,24 +113,22 @@ public class EntityCompileService {
     }
 
     private Map<String, Object> startCompile(String profileId, boolean automatic) {
-        for (Job existing : jobs.values()) if ("entities".equals(existing.topicKey) && "running".equals(existing.status))
+        for (Job existing : jobs.activeJobs()) if ("entities".equals(existing.topicKey) && "running".equals(existing.status))
             return view(existing.id);
         Job job = new Job(UUID.randomUUID().toString().substring(0, 8), "entities", profileId);
         job.automatic = automatic;
-        jobs.put(job.id, job);
-        runner.submit(() -> compile(job, profileId));
+        jobs.submit(job.id, job, runner, () -> compile(job, profileId), () -> markAborted(job));
         return view(job.id);
     }
 
     /** 只更新这个已存在的实体页，不重新抽取实体、筛选十页或重写索引。 */
     public synchronized Map<String, Object> startRegenerate(String topicKey, String profileId) {
-        for (Job existing : jobs.values()) if (topicKey.equals(existing.topicKey) && "running".equals(existing.status))
+        for (Job existing : jobs.activeJobs()) if (topicKey.equals(existing.topicKey) && "running".equals(existing.status))
             return view(existing.id);
         requireEntityPage(topicKey);
         Job job = new Job(UUID.randomUUID().toString().substring(0, 8), topicKey, profileId);
         job.total = 1;
-        jobs.put(job.id, job);
-        runner.submit(() -> regenerate(job, profileId));
+        jobs.submit(job.id, job, runner, () -> regenerate(job, profileId), () -> markAborted(job));
         return view(job.id);
     }
 

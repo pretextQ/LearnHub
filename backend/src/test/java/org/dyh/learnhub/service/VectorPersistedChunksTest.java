@@ -15,6 +15,8 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -124,6 +126,28 @@ class VectorPersistedChunksTest {
         snapshot = service.currentPassages(config).orElseThrow();
         assertEquals(List.of(2L), snapshot.sources().stream().map(row -> row.get("source_id")).toList());
         assertTrue(snapshot.stored().isEmpty());
+    }
+
+    @Test void rebuildStillCoalescesRequestsAndKeepsTheTerminalResultPollable() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        when(embedder.snapshot()).thenAnswer(call -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return null;
+        });
+        String id = (String) service.startRebuild().get("jobId");
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertEquals(id, service.startRebuild().get("jobId"));
+            assertEquals("running", service.jobView(id).get("status"));
+        } finally {
+            release.countDown();
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while ("running".equals(service.jobView(id).get("status")) && System.nanoTime() < deadline) Thread.sleep(5);
+        assertEquals("failed", service.jobView(id).get("status"));
+        verify(embedder).snapshot();
     }
 
 }

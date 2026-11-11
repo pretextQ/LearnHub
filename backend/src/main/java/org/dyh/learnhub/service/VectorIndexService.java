@@ -22,7 +22,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
@@ -275,15 +274,22 @@ public class VectorIndexService {
         t.setDaemon(true);
         return t;
     });
-    private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    private final JobHistory<Job> jobs = new JobHistory<>();
+
+    private static void markAborted(Job job) {
+        if (!"running".equals(job.status)) return;
+        job.error = "任务意外中断";
+        job.stage = "失败";
+        job.finishedAt = System.currentTimeMillis();
+        job.status = "failed";
+    }
 
     public Map<String, Object> startRebuild() {
         // A timed-out observer or a manual click can rejoin the existing job instead of rebuilding twice.
         synchronized (jobs) {
-            for (Job existing : jobs.values()) if ("running".equals(existing.status)) return jobView(existing.id);
+            for (Job existing : jobs.activeJobs()) if ("running".equals(existing.status)) return jobView(existing.id);
             Job job = new Job(UUID.randomUUID().toString().substring(0, 8));
-            jobs.put(job.id, job);
-            runner.submit(() -> rebuild(job));
+            jobs.submit(job.id, job, runner, () -> rebuild(job), () -> markAborted(job));
             return jobView(job.id);
         }
     }

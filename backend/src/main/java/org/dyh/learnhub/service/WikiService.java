@@ -663,7 +663,15 @@ public class WikiService {
                 t.setDaemon(true);
                 return t;
             });
-    private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    private final JobHistory<Job> jobs = new JobHistory<>();
+
+    private static void markAborted(Job job) {
+        if (!"running".equals(job.status)) return;
+        job.error = "任务意外中断";
+        job.stage = "失败";
+        job.finishedAt = System.currentTimeMillis();
+        job.status = "failed";
+    }
 
     /**
      * 可选目标列表 = **对话模型档案**（嵌入档案不能生成文本）。
@@ -728,8 +736,7 @@ public class WikiService {
      */
     public Map<String, Object> startRecompile() {
         Job job = new Job(UUID.randomUUID().toString().substring(0, 8), "recompile", "impact");
-        jobs.put(job.id, job);
-        jobRunner.submit(() -> recompile(job));
+        jobs.submit(job.id, job, jobRunner, () -> recompile(job), () -> markAborted(job));
         return jobView(job.id);
     }
 
@@ -855,7 +862,7 @@ public class WikiService {
      * 与**真实进度**（流式累计的生成字数），失败也能看到具体原因。
      */
     public synchronized Map<String, Object> startGenerate(String topicKey, String targetId) {
-        for (Job active : jobs.values()) if (active.topicKey.equals(topicKey) && "running".equals(active.status))
+        for (Job active : jobs.activeJobs()) if (active.topicKey.equals(topicKey) && "running".equals(active.status))
             return jobView(active.id);
         Topic topic = resolve(topicKey);
         if ("entity".equals(topic.type())) return entityCompileService.startRegenerate(topic.key(), targetId);
@@ -878,8 +885,7 @@ public class WikiService {
         }
         Job job = new Job(UUID.randomUUID().toString().substring(0, 8), topicKey, t.id());
         job.model = t.model();
-        jobs.put(job.id, job);
-        jobRunner.submit(() -> runGenerate(job, topic, m, t));
+        jobs.submit(job.id, job, jobRunner, () -> runGenerate(job, topic, m, t), () -> markAborted(job));
         return jobView(job.id);
     }
 
@@ -1025,8 +1031,7 @@ public class WikiService {
             }
             Job job = new Job(UUID.randomUUID().toString().substring(0, 8), topicKey, t.id());
             job.model = t.model();
-            jobs.put(job.id, job);
-            jobRunner.submit(() -> runGenerate(job, topic, m, t));
+            jobs.submit(job.id, job, jobRunner, () -> runGenerate(job, topic, m, t), () -> markAborted(job));
         } catch (Exception e) {
             log.warn("wiki 自动更新排程失败：{} - {}", topicKey, e.toString());
         }
